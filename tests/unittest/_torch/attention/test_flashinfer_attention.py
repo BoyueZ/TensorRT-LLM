@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import random
 import unittest
 from collections import defaultdict
 from dataclasses import dataclass
@@ -984,15 +983,14 @@ class TestFlashInferAttention(unittest.TestCase):
         dtype = test_scenario.dtype
         device = 'cuda'
 
-        # For simplicity, just use 1 page per request in this example.
+        # Start at a page boundary so the next decode step changes the page
+        # geometry and exercises CUDA-graph plan refresh.
         tokens_per_block = 128
-        past_seen_tokens = [
-            random.randint(1, tokens_per_block - 1) for _ in range(batch_size)
-        ]
+        past_seen_tokens = [tokens_per_block - 1] * batch_size
         request_ids = list(range(batch_size))
-        token_nums = (torch.tensor(past_seen_tokens) + 1).tolist()
+        token_nums = [tokens_per_block + 1] * batch_size
 
-        num_blocks = 16
+        num_blocks = 2 * batch_size
         max_seq_len = tokens_per_block * num_blocks
         num_layers = 1 if isinstance(num_kv_heads, int) else len(num_kv_heads)
         mapping = Mapping(world_size=1, tp_size=1, rank=0)
@@ -1087,14 +1085,12 @@ class TestFlashInferAttention(unittest.TestCase):
         attn_metadata_ref.prepare()
         attn_metadata_cuda_graph.prepare()
 
-        results_ref = []
-
         for i in range(num_layers):
             q = torch.cat(gen_qs[i])
             k = torch.cat(gen_ks[i])
             v = torch.cat(gen_vs[i])
             layer = layers[i]
-            results_ref.append(layer.forward(q, k, v, attn_metadata_ref))
+            layer.forward(q, k, v, attn_metadata_ref)
 
         graph = torch.cuda.CUDAGraph()
         for i in range(num_layers):
@@ -1105,6 +1101,45 @@ class TestFlashInferAttention(unittest.TestCase):
             # Warmup run, required by PT
             for _ in range(2):
                 layer.forward(q, k, v, attn_metadata_cuda_graph)
+
+        graph_plan_counts = {
+            plan_params: attn_metadata_cuda_graph.get_num_plans(plan_params)
+            for plan_params in attn_metadata_cuda_graph._plan_params_to_wrappers
+        }
+        refreshed_past_seen_tokens = [tokens_per_block] * batch_size
+        attn_metadata_ref.kv_cache_params.num_cached_tokens_per_seq = (
+            refreshed_past_seen_tokens)
+        attn_metadata_cuda_graph.kv_cache_params.num_cached_tokens_per_seq = (
+            refreshed_past_seen_tokens)
+
+        # prepare() may change the page metadata used by every persistent
+        # wrapper. CUDA graph replay cannot re-enter Python to plan lazily, so
+        # all wrappers must be refreshed before capture or replay.
+        attn_metadata_cuda_graph.prepare()
+        graph_wrappers = list(
+            attn_metadata_cuda_graph._plan_params_to_wrappers.values())
+        self.assertTrue(all(wrapper.is_planned for wrapper in graph_wrappers))
+        for plan_params, previous_count in graph_plan_counts.items():
+            self.assertGreater(
+                attn_metadata_cuda_graph.get_num_plans(plan_params),
+                previous_count,
+            )
+
+        eager_wrappers = list(
+            attn_metadata_ref._plan_params_to_wrappers.values())
+        attn_metadata_ref.prepare()
+        self.assertEqual(
+            [wrapper.is_planned for wrapper in eager_wrappers],
+            [num_layers == 1] * num_layers,
+        )
+
+        results_ref = []
+        for i in range(num_layers):
+            q = torch.cat(gen_qs[i])
+            k = torch.cat(gen_ks[i])
+            v = torch.cat(gen_vs[i])
+            results_ref.append(layers[i].forward(q, k, v, attn_metadata_ref))
+        self.assertTrue(all(wrapper.is_planned for wrapper in eager_wrappers))
 
         results_actual = []
         with torch.cuda.graph(graph):
@@ -1117,6 +1152,29 @@ class TestFlashInferAttention(unittest.TestCase):
                     layer.forward(q, k, v, attn_metadata_cuda_graph))
 
         graph.replay()
+
+        if batch_size > 1:
+            active_batch_size = batch_size // 2
+            # Keep the captured buffers at graph capacity while shrinking
+            # the active host metadata.
+            attn_metadata_cuda_graph._seq_lens = torch.ones(
+                (active_batch_size, ), dtype=torch.int)
+            attn_metadata_cuda_graph.on_update()
+            attn_metadata_cuda_graph.request_ids = request_ids[:
+                                                               active_batch_size]
+            attn_metadata_cuda_graph.kv_cache_params = KVCacheParams(
+                use_cache=True,
+                num_cached_tokens_per_seq=
+                refreshed_past_seen_tokens[:active_batch_size],
+            )
+            attn_metadata_cuda_graph.prepare()
+
+            for wrappers in attn_metadata_cuda_graph._plan_params_to_wrappers.values(
+            ):
+                self.assertEqual(wrappers.decode_wrapper._fixed_batch_size,
+                                 batch_size)
+                self.assertEqual(wrappers.decode_wrapper._batch_size,
+                                 batch_size)
 
         for result_actual, result_ref in zip(results_actual, results_ref):
             torch.testing.assert_close(result_actual,

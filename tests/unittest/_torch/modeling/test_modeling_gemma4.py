@@ -2938,6 +2938,10 @@ class TestGemma4CUDAGraph(unittest.TestCase):
 
         for plan_params, wrappers in metadata._plan_params_to_wrappers.items():
             with self.subTest(head_dim=plan_params.head_dim):
+                self.assertEqual(wrappers.decode_wrapper._fixed_batch_size,
+                                 len(initial_page_counts))
+                self.assertEqual(wrappers.decode_wrapper._batch_size,
+                                 len(initial_page_counts))
                 block_tables = wrappers.decode_wrapper._block_tables
                 expected = self._expected_decode_block_table(
                     metadata,
