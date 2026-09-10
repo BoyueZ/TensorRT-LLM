@@ -1477,6 +1477,12 @@ class FlashInferAttentionMetadata(AttentionMetadata):
                 wrappers = self._plan_params_to_wrappers[plan_params]
                 if wrappers.fa2_plan_num_blocks is not None:
                     continue
+                if (self.is_cuda_graph and self.num_contexts == 0
+                        and getattr(wrappers.decode_wrapper, '_backend',
+                                    None) == 'trtllm-gen'):
+                    # prepare() refreshes the captured table and KV lengths
+                    # in place. trtllm-gen has no FA2-style schedule to replan.
+                    continue
                 wrappers.is_planned = False
                 if not defer_plan:
                     self._plan_with_params(plan_params)
@@ -1780,9 +1786,7 @@ class FlashInferAttentionMetadata(AttentionMetadata):
 
         # CUDA graph + trtllm-gen: update _block_tables and _kv_lens_buffer
         # so the trtllm-gen decode kernel uses current page indices.
-        if (self.is_cuda_graph and self._vswa_layer_to_pool is not None
-                and self._vswa_pool_indices_cache is not None
-                and self.num_generations > 0):
+        if self.is_cuda_graph and self.num_generations > 0:
             decode_blocks = num_blocks[self.num_contexts:]
             for plan_params, wrappers in self._plan_params_to_wrappers.items():
                 if plan_params.attention_mask_data is not None:
@@ -1791,8 +1795,9 @@ class FlashInferAttentionMetadata(AttentionMetadata):
                 block_tables = getattr(decode_wrapper, '_block_tables', None)
                 if block_tables is None:
                     continue
-                pool_id = plan_params.kv_pool_id
-                if pool_id is None:
+                host_pool_indices = self._host_pool_indices.get(
+                    plan_params.kv_pool_id, self._host_paged_kv_indices)
+                if host_pool_indices is None:
                     continue
                 batch_size, table_width = block_tables.shape
                 rows = min(batch_size, self.num_generations)
@@ -1827,7 +1832,6 @@ class FlashInferAttentionMetadata(AttentionMetadata):
                 # `arange`, `gather`, `where`, `zero`, and copy kernels on every decode step.
                 host_table = host_block_tables[:update_rows, :update_width]
                 host_table.zero_()
-                host_pool_indices = self._host_pool_indices[pool_id]
                 # Pool indices are flattened as context blocks followed by each generation request's
                 # blocks.
                 source_offset = self.num_context_blocks
@@ -2122,7 +2126,10 @@ class FlashInferAttentionMetadata(AttentionMetadata):
                 q_len_per_req=plan_params.q_len_per_req,
                 disable_split_kv=False,
             )
-            if use_graph_tensor_cores and decode_wrapper._backend == 'fa2':
+            if (self.is_cuda_graph and self.num_contexts == 0
+                    and decode_wrapper._backend == 'fa2'):
+                # Every captured FA2 decode wrapper owns a page-dependent
+                # schedule, including H128 and CUDA-core decode wrappers.
                 wrappers.fa2_plan_num_blocks = tuple(
                     self.num_blocks[self.num_contexts:])
             self._publish_decode_wrapper_kv_lens(decode_wrapper)
