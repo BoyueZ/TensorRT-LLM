@@ -23,7 +23,7 @@ from tensorrt_llm._torch.attention.backends.interface import \
     PredefinedAttentionMask
 from tensorrt_llm._torch.metadata import KVCacheParams
 from tensorrt_llm._torch.pyexecutor.resource_manager import KVCacheManager
-from tensorrt_llm._utils import prefer_pinned
+from tensorrt_llm._utils import is_sm_100f, prefer_pinned
 from tensorrt_llm.bindings.executor import KvCacheConfig
 from tensorrt_llm.functional import AttentionMaskType
 from tensorrt_llm.mapping import Mapping
@@ -1125,6 +1125,179 @@ class TestFlashInferAttention(unittest.TestCase):
                                        rtol=0)
 
         kv_cache_manager.shutdown()
+
+    @parameterized.expand([
+        ("fa2", [8, 4], 1),
+        ("fa2", [8, 4], 4),
+        ("fa2", [2, 1], 1),
+        ("fa2", [2, 1], 4),
+        ("trtllm-gen", [2, 1], 1),
+        ("trtllm-gen", [2, 1], 4),
+        ("trtllm-gen", [2], 1),
+        ("trtllm-gen", [2], 4),
+    ])
+    @torch.no_grad()
+    def test_cuda_graph_replay_refreshes_decode_state(self, backend: str,
+                                                      num_kv_heads: list[int],
+                                                      batch_size: int) -> None:
+        """Refresh multiple wrappers after capture, including KV append addresses."""
+        if backend == "trtllm-gen" and not is_sm_100f():
+            self.skipTest("trtllm-gen attention requires SM100f")
+        torch.manual_seed(0)
+        page_size, max_pages = 32, 64
+        num_heads, head_dim = 8, 128
+        dtype = torch.bfloat16
+        manager = KVCacheManager(
+            KvCacheConfig(max_tokens=2 * batch_size * max_pages * page_size),
+            tensorrt_llm.bindings.internal.batch_manager.CacheType.SELF,
+            num_layers=len(num_kv_heads),
+            num_kv_heads=num_kv_heads,
+            head_dim=head_dim,
+            tokens_per_block=page_size,
+            max_seq_len=max_pages * page_size,
+            max_batch_size=2 * batch_size,
+            mapping=Mapping(world_size=1, tp_size=1, rank=0),
+            dtype=tensorrt_llm.bindings.DataType.BF16,
+        )
+        self.addCleanup(manager.shutdown)
+        manager.add_dummy_requests(list(range(2 * batch_size)),
+                                   [max_pages * page_size] * (2 * batch_size))
+        layers = [
+            FlashInferAttention(layer_idx=i,
+                                num_heads=num_heads,
+                                num_kv_heads=kv_heads,
+                                head_dim=head_dim,
+                                flashinfer_backend=backend)
+            for i, kv_heads in enumerate(num_kv_heads)
+        ]
+        kv_buffers = [manager.get_buffers(layer.layer_idx) for layer in layers]
+        for buffer in kv_buffers:
+            buffer.normal_()
+        inputs = [
+            tuple(
+                torch.randn(
+                    batch_size, heads * head_dim, dtype=dtype, device="cuda")
+                for heads in [num_heads, kv_heads, kv_heads])
+            for kv_heads in num_kv_heads
+        ]
+
+        # trtllm-gen captures a maximum-KV-length launch bound. Keep all replay
+        # lengths within it; FA2 starts short to exercise schedule growth.
+        initial_length = (max_pages * page_size -
+                          1 if backend == "trtllm-gen" else 1)
+        metadata_args = dict(
+            seq_lens=torch.ones(batch_size, dtype=torch.int),
+            num_contexts=0,
+            kv_cache_params=KVCacheParams(
+                use_cache=True,
+                num_cached_tokens_per_seq=[initial_length] * batch_size),
+            max_num_requests=batch_size,
+            max_num_tokens=batch_size,
+            kv_cache_manager=manager,
+            request_ids=list(range(batch_size)),
+        )
+        eager = TestingFlashInferAttentionMetadata(**metadata_args)
+        captured = TestingFlashInferAttentionMetadata(is_cuda_graph=True,
+                                                      **metadata_args)
+        eager.prepare()
+        captured.prepare()
+        self.assertIsNone(captured._vswa_layer_to_pool)
+
+        # Pin the backend under test: production's auto selection can choose
+        # trtllm-gen for tensor-core FA2 shapes on Blackwell.
+        builder = flashinfer_backend.flashinfer.BatchDecodeWithPagedKVCacheWrapper
+
+        def make_decode_wrapper(
+            *args, **kwargs
+        ) -> flashinfer_backend.flashinfer.BatchDecodeWithPagedKVCacheWrapper:
+            kwargs["backend"] = backend
+            return builder(*args, **kwargs)
+
+        with mock.patch.object(flashinfer_backend.flashinfer,
+                               "BatchDecodeWithPagedKVCacheWrapper",
+                               side_effect=make_decode_wrapper):
+            for _ in range(2):
+                for layer, (q, k, v) in zip(layers, inputs):
+                    layer.forward(q, k, v, eager)
+                    layer.forward(q, k, v, captured)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = [
+                layer.forward(q, k, v, captured)
+                for layer, (q, k, v) in zip(layers, inputs)
+            ]
+        wrappers = captured._plan_params_to_wrappers
+        self.assertEqual(len(wrappers), len(layers))
+        table_addresses = {
+            pp: wrapper.decode_wrapper._block_tables.data_ptr()
+            for pp, wrapper in wrappers.items() if backend == "trtllm-gen"
+        }
+        lengths = [page_size * (i + 1) for i in range(batch_size)]
+        transitions = [
+            # Change only page ownership while retaining the captured lengths.
+            (list(range(batch_size,
+                        2 * batch_size)), [initial_length] * batch_size),
+            (list(range(batch_size)), [length - 1 for length in lengths]),
+            (list(range(batch_size)), lengths),
+            (list(range(batch_size)), [length + 1 for length in lengths]),
+            # Same lengths, different physical pages: lengths alone cannot
+            # make a stale block table correct, even for a one-request batch.
+            (list(range(batch_size,
+                        2 * batch_size)), [length + 1 for length in lengths]),
+            (list(range(batch_size)), [page_size * 48] * batch_size),
+        ]
+        for request_ids, cached_lengths in transitions:
+            with self.subTest(request_ids=request_ids, lengths=cached_lengths):
+                for tensors in inputs:
+                    for tensor in tensors:
+                        tensor.normal_()
+                before_kv = [buffer.clone() for buffer in kv_buffers]
+                old_blocks = tuple(captured.num_blocks)
+                old_plans = {pp: captured.get_num_plans(pp) for pp in wrappers}
+                for metadata in [eager, captured]:
+                    metadata.request_ids = request_ids
+                    metadata.kv_cache_params = KVCacheParams(
+                        use_cache=True,
+                        num_cached_tokens_per_seq=cached_lengths)
+                    metadata.prepare()
+                expected = [
+                    layer.forward(q, k, v, eager)
+                    for layer, (q, k, v) in zip(layers, inputs)
+                ]
+                expected_kv = [buffer.clone() for buffer in kv_buffers]
+                for buffer, before in zip(kv_buffers, before_kv):
+                    buffer.copy_(before)
+
+                if backend == "trtllm-gen":
+                    # A valid nonzero page ID in unused columns must not affect
+                    # attention: runtime KV lengths define the readable range.
+                    for wrapper in wrappers.values():
+                        table = wrapper.decode_wrapper._block_tables
+                        for row, count in enumerate(captured.num_blocks):
+                            table[row, count:].fill_(1)
+
+                # No Python attention forward or re-capture after prepare().
+                graph.replay()
+                for result, reference in zip(actual, expected):
+                    torch.testing.assert_close(result,
+                                               reference,
+                                               atol=1e-2,
+                                               rtol=0)
+                for buffer, reference in zip(kv_buffers, expected_kv):
+                    torch.testing.assert_close(buffer,
+                                               reference,
+                                               atol=0,
+                                               rtol=0)
+                for pp, wrapper in wrappers.items():
+                    replans = int(backend == "fa2"
+                                  and tuple(captured.num_blocks) != old_blocks)
+                    self.assertEqual(captured.get_num_plans(pp),
+                                     old_plans[pp] + replans)
+                    if backend == "trtllm-gen":
+                        self.assertEqual(
+                            wrapper.decode_wrapper._block_tables.data_ptr(),
+                            table_addresses[pp])
 
     def test_ragged_prefill_no_kv_cache_uses_cudnn_plan(self) -> None:
         """Ragged QKV with ``kv_cache_manager=None`` plans via cuDNN (``_plan_ragged_cudnn_no_kv``)."""
