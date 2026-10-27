@@ -448,12 +448,15 @@ def create_transfer_worker_setup(
     is_mla: bool = False,
     use_v2: bool = False,
     max_attention_window_vec: Optional[List[int]] = None,
+    native_auth_key: Optional[bytes] = None,
 ):
     """Helper function to set up transfer workers for testing.
 
     Args:
         use_v2: If True, use KVCacheManagerV2. Otherwise use KVCacheManager (C++ bindings).
         max_attention_window_vec: List of window sizes, e.g. [max_seq_len] or [max_seq_len, small_window].
+        native_auth_key: Shared internal_request_auth_key for every worker; None leaves the
+            control plane unauthenticated.
     """
     ctx_mappings = []
     for i in range(ctx_pp):
@@ -632,6 +635,7 @@ def create_transfer_worker_setup(
                     instance_name=ctx_instance_name,
                     max_concurrent_sessions=max_batch_size * 2,
                     max_draft_len=4,
+                    native_auth_key=native_auth_key,
                 )
             )
         )
@@ -748,6 +752,7 @@ def create_transfer_worker_setup(
                     instance_name=gen_instance_name,
                     max_concurrent_sessions=max_batch_size * 2,
                     max_draft_len=4,
+                    native_auth_key=native_auth_key,
                 )
             )
         )
@@ -1322,6 +1327,47 @@ def test_transfer_worker_v1(ctx_tp, ctx_pp, ctx_enable_dp, gen_tp, gen_pp, gen_e
         for worker in setup["ctx_transfer_workers"]:
             worker.shutdown()
         for worker in setup["gen_transfer_workers"]:
+            worker.shutdown()
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.parametrize(
+    "ctx_tp,ctx_pp,ctx_enable_dp,gen_tp,gen_pp,gen_enable_dp,is_mla",
+    [
+        (c[0], c[1], c[2], c[3], c[4], c[5], c[6])
+        for c in PARALLEL_TEST_CONFIGS
+        if c[7] in ("tp1_pp1_to_tp1_pp1", "tp2_pp1_to_tp1_pp2", "tp2_pp1_dp_to_tp2_pp1_dp")
+    ],
+    ids=["tp1_pp1_to_tp1_pp1", "tp2_pp1_to_tp1_pp2", "tp2_pp1_dp_to_tp2_pp1_dp"],
+)
+def test_transfer_worker_v2_with_native_auth(
+    ctx_tp, ctx_pp, ctx_enable_dp, gen_tp, gen_pp, gen_enable_dp, is_mla
+):
+    """Transfers succeed end to end with signed control messages on every worker."""
+    setup = create_transfer_worker_setup(
+        ctx_tp=ctx_tp,
+        ctx_pp=ctx_pp,
+        ctx_enable_dp=ctx_enable_dp,
+        gen_tp=gen_tp,
+        gen_pp=gen_pp,
+        gen_enable_dp=gen_enable_dp,
+        is_mla=is_mla,
+        use_v2=True,
+        native_auth_key=b"k" * 32,
+    )
+    workers = setup["ctx_transfer_workers"] + setup["gen_transfer_workers"]
+    request_len = setup["request_len"]
+    try:
+        add_and_verify_request(setup, 0, 1, request_len, send_first=True)
+        add_and_verify_request(setup, 2, 3, request_len * 2, send_first=False)
+        messengers = [w._sender._messenger for w in workers] + [
+            w._receiver._messenger for w in workers
+        ]
+        assert all(m._signer is not None for m in messengers)
+        assert sum(m.auth_failures for m in messengers) == 0
+        assert sum(m.replays_rejected for m in messengers) == 0
+    finally:
+        for worker in workers:
             worker.shutdown()
 
 
