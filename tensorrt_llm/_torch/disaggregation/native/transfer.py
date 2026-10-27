@@ -611,7 +611,7 @@ class Sender(SenderBase):
         self._peer_requests: dict = {}
         self._peer_requests_timestamps: dict[int, float] = {}  # unique_rid -> insert time
         self._peer_requests_lock = threading.Lock()
-        self._messenger = ZMQMessenger(mode="ROUTER")
+        self._messenger = ZMQMessenger(mode="ROUTER", signer=None)
         self._dealers = {}  # used by listener thread only (single-threaded path)
         self._thread_local = threading.local()  # per-thread DEALER cache for worker threads
         self._sessions = {}  # unique_rid -> TxSession
@@ -817,7 +817,7 @@ class Sender(SenderBase):
             dealers = {}
             self._thread_local.dealers = dealers
         if endpoint not in dealers:
-            dealers[endpoint] = ZMQMessenger(mode="DEALER", endpoint=endpoint)
+            dealers[endpoint] = ZMQMessenger(mode="DEALER", endpoint=endpoint, signer=None)
         return dealers[endpoint]
 
     def _get_result_dealer(
@@ -1933,7 +1933,7 @@ class Sender(SenderBase):
         if endpoint is None:
             raise ValueError("Sender: peer endpoint is None; peer may not have registered yet")
         if endpoint not in self._dealers:
-            self._dealers[endpoint] = ZMQMessenger(mode="DEALER", endpoint=endpoint)
+            self._dealers[endpoint] = ZMQMessenger(mode="DEALER", endpoint=endpoint, signer=None)
         return self._dealers[endpoint]
 
     def _save_peer_req_info(self, peer_transfer_req_info: RecvReqInfo):
@@ -2710,7 +2710,7 @@ class Receiver(ReceiverBase):
         # discipline as _sender_ep_instance_map).
         self._incompatible_peers: dict[str, str] = {}
 
-        self._messenger = ZMQMessenger(mode="ROUTER")
+        self._messenger = ZMQMessenger(mode="ROUTER", signer=None)
         self._sessions = {}  # unique_rid -> RxSession
         self._sessions_lock = threading.Lock()  # Protects _sessions and _pre_cancelled_rids
         # unique_rid -> whether the peer asked, for cancels that arrive before the session exists.
@@ -3118,7 +3118,7 @@ class Receiver(ReceiverBase):
         if endpoint is None:
             raise ValueError("Receiver: peer endpoint is None; peer may not have registered yet")
         if endpoint not in self._dealers:
-            self._dealers[endpoint] = ZMQMessenger(mode="DEALER", endpoint=endpoint)
+            self._dealers[endpoint] = ZMQMessenger(mode="DEALER", endpoint=endpoint, signer=None)
         return self._dealers[endpoint]
 
     def _get_sender_info(self, params: DisaggregatedParams) -> RankInfo:
@@ -3129,7 +3129,7 @@ class Receiver(ReceiverBase):
             raise PeerIncompatibleError(self._incompatible_peers[info_endpoint])
         if self._should_register_peer(params):
             logger.info(f"Registering peer in first request to endpoint '{info_endpoint}'")
-            messenger = ZMQMessenger(mode="DEALER", endpoint=info_endpoint)
+            messenger = ZMQMessenger(mode="DEALER", endpoint=info_endpoint, signer=None)
             deadline = time.monotonic() + self._rank_info_timeout_s
             try:
                 messenger.send([MessageType.REQUEST_INSTANCE_INFO])
@@ -4276,7 +4276,7 @@ class RankInfoServer:
             endpoint = f"tcp://{get_local_ip()}:*"
         else:
             endpoint = f"tcp://{addr}:{port}"
-        self._messenger = ZMQMessenger(mode="ROUTER", endpoint=endpoint)
+        self._messenger = ZMQMessenger(mode="ROUTER", endpoint=endpoint, signer=None)
         if self._rank_info_auth_key is None:
             logger.warning(
                 "Native RankInfo authentication is disabled: internal_request_auth_key is not "

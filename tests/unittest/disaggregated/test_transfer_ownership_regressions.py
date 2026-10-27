@@ -3097,7 +3097,8 @@ def test_receiver_rejects_peer_on_another_protocol_version_at_registration(
     messengers: list[object] = []
 
     class _InfoMessenger:
-        def __init__(self, *, mode: str, endpoint: str) -> None:
+        def __init__(self, *, mode: str, endpoint: str, signer=None, identity=None) -> None:
+            assert signer is None
             self.sent: list[list[bytes]] = []
             self.stopped = False
             messengers.append(self)
