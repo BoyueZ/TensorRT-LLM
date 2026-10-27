@@ -3105,7 +3105,7 @@ def test_receiver_rejects_peer_on_another_protocol_version_at_registration(
         def send(self, message: list[bytes]) -> None:
             self.sent.append(message)
 
-        def receive(self) -> list[bytes]:
+        def receive(self, timeout_ms: int | None = None) -> list[bytes]:
             return [peer_bytes]
 
         def stop(self) -> None:
@@ -3113,6 +3113,10 @@ def test_receiver_rejects_peer_on_another_protocol_version_at_registration(
 
     monkeypatch.setattr(transfer_mod, "ZMQMessenger", _InfoMessenger)
     receiver = object.__new__(Receiver)
+    receiver._sessions_lock = threading.Lock()
+    receiver._shutdown = True
+    receiver._rank_info_auth_key = None
+    receiver._rank_info_timeout_s = 60.0
     receiver._incompatible_peers = {}
     receiver._sender_ep_instance_map = {}
     receiver._dealers = {}

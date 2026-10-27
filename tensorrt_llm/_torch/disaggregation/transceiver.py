@@ -51,6 +51,7 @@ from tensorrt_llm._torch.disaggregation.native.transfer import (
     RxSession,
     TransferWorker,
     TransferWorkerConfig,
+    _validate_rank_info_auth_key,
 )
 from tensorrt_llm._torch.disaggregation.resource.cache_reuse import (
     CacheReuseAdapter,
@@ -268,6 +269,8 @@ def _chunk_bytes_by_kind(page_table, chunk: Chunk) -> Tuple[int, int]:
 
 
 class KvCacheTransceiverV2(KvCacheTransceiver):
+    _pending_rank_info_admissions: Optional[dict[int, tuple[LlmRequest, Optional[str]]]] = None
+
     @property
     def consumes_transfer_buffer(self) -> bool:
         return False
@@ -308,6 +311,7 @@ class KvCacheTransceiverV2(KvCacheTransceiver):
             else None
         )
         self._check_compatible()
+        _validate_rank_info_auth_key(cache_transceiver_config._rank_info_auth_key)
         enforce_physical_ownership = _validate_fp4_mla_bridge_profile(
             mapping, kv_cache_manager, cache_transceiver_config
         )
@@ -364,6 +368,7 @@ class KvCacheTransceiverV2(KvCacheTransceiver):
                     else 0
                 ),
                 agent_bounce_params=cache_transceiver_config.agent_bounce_params,
+                rank_info_auth_key=cache_transceiver_config._rank_info_auth_key,
             )
         )
         if enforce_physical_ownership:
@@ -406,6 +411,12 @@ class KvCacheTransceiverV2(KvCacheTransceiver):
         # per-iter tp_allgather when this transceiver never sends/receives.
         self._ever_had_send_session: bool = False
         self._ever_had_recv_session: bool = False
+        # Keyed multi-rank receives agree on admission before publication.
+        self._pending_rank_info_admissions = (
+            {}
+            if cache_transceiver_config._rank_info_auth_key is not None and self._gen_need_sync
+            else None
+        )
 
     def _fail_unproven_transfer(self, event: QuiescenceFatalEvent) -> None:
         """Fail-stop while the watchdog retains this transceiver's resource roots.
@@ -608,6 +619,8 @@ class KvCacheTransceiverV2(KvCacheTransceiver):
         self._send_reqs.clear()
         self._recv_sessions.clear()
         self._recv_reqs.clear()
+        if self._pending_rank_info_admissions is not None:
+            self._pending_rank_info_admissions.clear()
         self._transfer_worker.shutdown()
         self._shutdown_complete = True
 
@@ -1185,6 +1198,20 @@ class KvCacheTransceiverV2(KvCacheTransceiver):
 
     @nvtx_range("KvCacheTransceiverV2.request_and_receive_sync")
     def request_and_receive_sync(self, req: LlmRequest) -> None:
+        if self._pending_rank_info_admissions is not None:
+            # Synchronous receives enter in the same admitted-request order on
+            # every generation rank, without rank-local CUDA-fence deferral.
+            # Agree before publication: a rejected rank cannot supply its shard.
+            error = None
+            try:
+                self._transfer_worker.prepare_rank_info(req)
+            except Exception as exc:
+                error = str(exc)
+            errors = self._gen_allgather(error)
+            if any(error is not None for error in errors):
+                logger.error(f"Synchronous RankInfo admission failed: {errors}")
+                req.state = LlmRequestState.DISAGG_TRANS_ERROR
+                return
         if not self._validate_bridge_req(req, synchronous=True):
             return
         rid = get_unique_rid(req)
@@ -1275,6 +1302,47 @@ class KvCacheTransceiverV2(KvCacheTransceiver):
                 f"request_and_receive_async: rid={rid} already has a recv session, skipping"
             )
             return
+        pending = self._pending_rank_info_admissions
+        if pending is not None:
+            if rid not in pending:
+                error = None
+                try:
+                    self._transfer_worker.prepare_rank_info(req)
+                except Exception as exc:
+                    # Network/decoding failures must also reach the symmetric
+                    # poll instead of skipping a collective on this rank.
+                    error = str(exc)
+                pending[rid] = (req, error)
+                req.state = LlmRequestState.DISAGG_GENERATION_TRANS_IN_PROGRESS
+            return
+        self._start_async_receive(req)
+
+    def _poll_rank_info_admissions(self, local_done: list[int]) -> tuple[list[int], list[int]]:
+        pending = self._pending_rank_info_admissions
+        if pending is None:
+            return self._gen_consensus(local_done), []
+        # Piggyback on the existing status collective, including ranks whose
+        # CUDA fence has not admitted any local receive yet.
+        votes = self._gen_allgather(
+            (local_done, {rid: error for rid, (_, error) in pending.items()})
+        )
+        done = _find_consensus_request_ids([vote[0] for vote in votes], len(votes))
+        admissions = [vote[1] for vote in votes]
+        ready = set.intersection(*(set(vote) for vote in admissions))
+        failed = []
+        for rid in sorted(ready):
+            req, _ = pending.pop(rid)
+            error = next((vote[rid] for vote in admissions if vote[rid] is not None), None)
+            if error is not None:
+                logger.error(f"RankInfo admission failed for request {rid}: {error}")
+                req.state = LlmRequestState.DISAGG_TRANS_ERROR
+                failed.append(rid)
+            else:
+                self._start_async_receive(req)
+        return done, failed
+
+    def _start_async_receive(self, req: LlmRequest) -> None:
+        rid = get_unique_rid(req)
         extent = self._create_cache_extent(req)
         paged_bytes, state_bytes = _chunk_bytes_by_kind(self._page_table, extent.local)
         req.py_kv_cache_xfer_bytes = self._request_kv_bytes(req, paged_bytes, state_bytes)
@@ -1402,9 +1470,12 @@ class KvCacheTransceiverV2(KvCacheTransceiver):
             self._poll_gen_sessions_for_poll_interval(wait_num)
 
         local_completed, local_failed = self._collect_done(self._recv_sessions, self._recv_reqs)
+        consensus, admission_failed = self._poll_rank_info_admissions(
+            local_completed + local_failed
+        )
         to_process = self._build_to_process(
             self._recv_sessions,
-            self._gen_consensus(local_completed + local_failed),
+            consensus,
             0 if need_progress else wait_num,
             block_all,
         )
@@ -1495,7 +1566,7 @@ class KvCacheTransceiverV2(KvCacheTransceiver):
             )
         self._close_failed_sessions(self._recv_sessions, self._recv_reqs, failed)
 
-        return GenTransferStatus(completed, failed, cancelled_reqs)
+        return GenTransferStatus(completed, failed + admission_failed, cancelled_reqs)
 
     def _poll_gen_sessions_for_poll_interval(self, wait_num: int) -> None:
         self._poll_sessions_for_interval(
@@ -1576,6 +1647,10 @@ class KvCacheTransceiverV2(KvCacheTransceiver):
         retry next iteration. Returns True when safe to free KV memory.
         """
         rid = get_unique_rid(req)
+
+        # A pending admission has not published any destination.
+        if self._pending_rank_info_admissions is not None:
+            self._pending_rank_info_admissions.pop(rid, None)
 
         # Not yet started (generation-first wait queue).
         self._wait_reqs.pop(rid, None)
