@@ -445,6 +445,10 @@ def test_messenger_receive_timeout_allows_subsequent_reply():
 
 @pytest.mark.parametrize("rejected_rank", [None, 0, 1])
 @pytest.mark.parametrize("reason", ["server busy", "handshake timed out"])
+@patch(
+    "tensorrt_llm._torch.disaggregation.transceiver._chunk_bytes_by_kind",
+    Mock(return_value=(8, 0)),
+)
 def test_sync_rank_info_admission_rejects_all_ranks_before_publication(rejected_rank, reason):
     from tensorrt_llm._torch.disaggregation.base.transfer import WaitResult
 
@@ -472,12 +476,12 @@ def test_sync_rank_info_admission_rejects_all_ranks_before_publication(rejected_
         fetches = Mock()
         fetches.session.wait_complete.return_value = WaitResult.COMPLETED
         tc._open_peer_source = Mock(return_value=fetches)
-        tc._chunk_num_bytes = Mock(return_value=8)
-        tc._kv_size_rank_factor = 1
+        tc._page_table = None
+        tc._request_kv_bytes = Mock(return_value=8)
         tc._need_aux_transfer = Mock(return_value=False)
         tc._assert_disagg_history_declared = Mock()
 
-        def publish(_extent):
+        def publish(_extent, **_kwargs):
             assert all(admitted)
             assert rejected_rank is None
 
