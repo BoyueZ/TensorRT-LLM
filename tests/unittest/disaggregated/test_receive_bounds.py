@@ -17,8 +17,9 @@
 import numpy as np
 import pytest
 
-from tensorrt_llm._torch.disaggregation.base import CacheKind, Chunk, TokenRange
+from tensorrt_llm._torch.disaggregation.base import CacheKind, TokenRange
 from tensorrt_llm._torch.disaggregation.base.region import MemRegionGroup, SpecRegion
+from tensorrt_llm._torch.disaggregation.native.extent import Chunk
 from tensorrt_llm._torch.disaggregation.native.mixers.attention.peer import HNDHeadMismatchMapper
 from tensorrt_llm._torch.disaggregation.native.mixers.attention.spec import AttentionInfo
 from tensorrt_llm._torch.disaggregation.native.mixers.ssm.peer import (
@@ -91,7 +92,6 @@ def _page_table() -> KVCachePageTable:
                         slot_bytes=32,
                         num_slots=4,
                         slot_stride_bytes=64,
-                        layer_stride_bytes=256,
                     )
                 ]
             ),

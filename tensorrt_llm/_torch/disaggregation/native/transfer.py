@@ -977,6 +977,7 @@ class Sender(SenderBase):
                         meta.receiver_slice_id,
                         True,
                         AgentResult.FAILED_QUIESCED,
+                        kv_result_report_token=meta.kv_result_report_token,
                     )
                 dealer.send(message)
             except Exception as error:

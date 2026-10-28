@@ -26,11 +26,15 @@ from tensorrt_llm._torch.disaggregation.base import TokenRange
 from tensorrt_llm._torch.disaggregation.base.transfer import SessionStatus
 from tensorrt_llm._torch.disaggregation.native import transfer as transfer_mod
 from tensorrt_llm._torch.disaggregation.native.extent import Chunk
+from tensorrt_llm._torch.disaggregation.native.receive_bounds import ReceiveBounds
 from tensorrt_llm._torch.disaggregation.native.retirement import RetirementWatchdog
 from tensorrt_llm._torch.disaggregation.transceiver import KvCacheTransceiverV2
 from tensorrt_llm.disaggregated_params import DisaggregatedParams, DisaggScheduleStyle
 
 pytestmark = pytest.mark.cpu_only
+
+
+_KV_RESULT_REPORT_TOKEN = b"report-token-123"
 
 
 def _params() -> DisaggregatedParams:
@@ -81,7 +85,7 @@ def _request_data() -> list[bytes]:
         aux_slot=3,
         slice_id=0,
     )
-    return [transfer_mod.MessageType.REQUEST_DATA, info.to_bytes()]
+    return [transfer_mod.MessageType.REQUEST_DATA, info.to_bytes(), _KV_RESULT_REPORT_TOKEN]
 
 
 def _assert_session_ack(sender: transfer_mod.Sender) -> None:
@@ -147,7 +151,14 @@ def test_worker_orders_session_ack_after_piece_reports(
     sender = _sender()
     sender._device_id, sender._thread_local = 0, threading.local()
     work_queue = sender._send_task_queues[0]
-    result = transfer_mod._make_kv_result_msg(7, 401, 0, True, transfer_mod.AgentResult.SUCCESS)
+    result = transfer_mod._make_kv_result_msg(
+        7,
+        401,
+        0,
+        True,
+        transfer_mod.AgentResult.SUCCESS,
+        kv_result_report_token=_KV_RESULT_REPORT_TOKEN,
+    )
     acknowledgement = [transfer_mod.MessageType.SESSION_QUIESCED, b"7", b"401"]
     sent, errors = [], queue.Queue()
     ack_attempts = 0
@@ -186,12 +197,33 @@ def test_worker_orders_session_ack_after_piece_reports(
         task.record_backend_submission(0, Mock(is_completed=Mock(return_value=True)))
         task.mark_physical_operation_in_doubt(0)
         empty = np.empty(0, dtype=np.int64)
-        meta = transfer_mod.WriteMeta(task, 1, "gen", 0, "tcp://gen:1234", 401, empty, empty, empty)
+        meta = transfer_mod.WriteMeta(
+            task,
+            1,
+            "gen",
+            0,
+            "tcp://gen:1234",
+            401,
+            empty,
+            empty,
+            empty,
+            kv_result_report_token=_KV_RESULT_REPORT_TOKEN,
+        )
         initial = transfer_mod._make_kv_result_msg(
-            7, 401, 0, False, transfer_mod.AgentResult.IN_DOUBT
+            7,
+            401,
+            0,
+            False,
+            transfer_mod.AgentResult.IN_DOUBT,
+            kv_result_report_token=_KV_RESULT_REPORT_TOKEN,
         )
         settled = transfer_mod._make_kv_result_msg(
-            7, 401, 0, True, transfer_mod.AgentResult.FAILED_QUIESCED
+            7,
+            401,
+            0,
+            True,
+            transfer_mod.AgentResult.FAILED_QUIESCED,
+            kv_result_report_token=_KV_RESULT_REPORT_TOKEN,
         )
         sender._pending_settlements[0][(task, 0)] = transfer_mod._PendingSettlement(meta, initial)
         expected = [initial, settled, acknowledgement]
@@ -443,8 +475,14 @@ def test_adp_candidate_acks_do_not_replace_selected_writer_or_aux_evidence(
     assert not task._get_physical_owner().all_writers_reported
     assert not session.resources_drained()
     if actual_writer_results:
+        task._receive_bounds = ReceiveBounds.from_chunk(
+            task._chunk, None, {rank: None for rank in (0, 1, 2, 3)}
+        )
+        task._kv_result_report_tokens = {rank: _KV_RESULT_REPORT_TOKEN for rank in (0, 1, 2, 3)}
         for rank in (2, 3):
-            session.process_kv_agent_result(rank, 0, True, transfer_mod.AgentResult.FAILED)
+            session.process_kv_agent_result(
+                rank, 0, True, transfer_mod.AgentResult.FAILED, _KV_RESULT_REPORT_TOKEN
+            )
         assert task._get_physical_owner().all_writers_reported
         assert not session.resources_drained(), "KV completion cannot retire outstanding AUX"
     session.process_session_quiesced(2)

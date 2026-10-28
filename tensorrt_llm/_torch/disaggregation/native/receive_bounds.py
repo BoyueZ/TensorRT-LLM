@@ -22,7 +22,8 @@ from typing import Mapping
 
 import numpy as np
 
-from tensorrt_llm._torch.disaggregation.base import CacheKind, Chunk
+from tensorrt_llm._torch.disaggregation.base import CacheKind
+from tensorrt_llm._torch.disaggregation.native.extent import Chunk
 from tensorrt_llm._torch.disaggregation.resource.page import KVCachePageTable
 from tensorrt_llm._torch.disaggregation.resource.utils import (
     get_layer_byte_ranges,

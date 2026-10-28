@@ -43,6 +43,7 @@ from tensorrt_llm._torch.disaggregation.native.mixers.attention.peer import (
     IntactMapper,
     ReplicatedMapper,
 )
+from tensorrt_llm._torch.disaggregation.native.receive_bounds import ReceiveBounds
 from tensorrt_llm._torch.disaggregation.native.transfer import (
     AgentResult,
     KVRecvTask,
@@ -72,6 +73,9 @@ pytestmark = pytest.mark.cpu_only
 # ---------------------------------------------------------------------------
 # Helpers (mirroring test_chunked_transfer.py)
 # ---------------------------------------------------------------------------
+
+
+_KV_RESULT_REPORT_TOKEN = b"report-token-123"
 
 
 def _make_params(rid: int = 42) -> DisaggregatedParams:
@@ -108,6 +112,9 @@ def _make_rx_session(
     )
     session.receive(_make_chunk(prompt_len), expected_write_bytes=expected_write_bytes)
     session._receiver._bounce.is_bounced.return_value = False
+    for task in session._kv_tasks:
+        task._receive_bounds = ReceiveBounds.from_chunk(task._chunk, None, {0: None, 1: None})
+        task._kv_result_report_tokens = {0: _KV_RESULT_REPORT_TOKEN, 1: _KV_RESULT_REPORT_TOKEN}
     return session
 
 
@@ -128,6 +135,7 @@ def _success(session, transfer_size: int, peer_rank: int = 0) -> None:
         receiver_slice_id=0,
         is_last_slice=True,
         status=AgentResult.SUCCESS,
+        kv_result_report_token=_KV_RESULT_REPORT_TOKEN,
         transfer_size=transfer_size,
     )
 
@@ -219,6 +227,7 @@ class TestRxSessionVerification:
             receiver_slice_id=0,
             is_last_slice=True,
             status=AgentResult.FAILED,
+            kv_result_report_token=_KV_RESULT_REPORT_TOKEN,
             transfer_size=4096,
         )
         assert session._kv_tasks[0].verified_write_bytes == 0
@@ -382,6 +391,7 @@ def _deliver_kv(monkeypatch, submit_result):
         slice_id=0,
         receiver_slice_id=0,
         is_last_slice=True,
+        kv_result_report_token=_KV_RESULT_REPORT_TOKEN,
     )
     monkeypatch.setattr(bounce_mod, "build_send_request", Mock(return_value=(Mock(), None)))
     monkeypatch.setattr(transfer_mod.Sender, "_submit_transfer", Mock(return_value=submit_result))
@@ -394,14 +404,16 @@ def _deliver_kv(monkeypatch, submit_result):
 
 class TestSenderAttestation:
     def test_completed_submission_attests_actual_bytes(self, monkeypatch):
-        _, _, _, _, status_code, transfer_size = _deliver_kv(monkeypatch, (True, None))
+        _, _, _, _, status_code, transfer_size, token = _deliver_kv(monkeypatch, (True, None))
         assert status_code == transfer_mod._AGENT_RESULT_CODE[AgentResult.SUCCESS]
         assert transfer_size == 0x400
+        assert token == _KV_RESULT_REPORT_TOKEN
 
     def test_failed_submission_attests_zero_bytes(self, monkeypatch):
-        _, _, _, _, status_code, transfer_size = _deliver_kv(monkeypatch, (False, -1))
+        _, _, _, _, status_code, transfer_size, token = _deliver_kv(monkeypatch, (False, -1))
         assert status_code == transfer_mod._AGENT_RESULT_CODE[AgentResult.FAILED]
         assert transfer_size == 0
+        assert token == _KV_RESULT_REPORT_TOKEN
 
 
 # ---------------------------------------------------------------------------
