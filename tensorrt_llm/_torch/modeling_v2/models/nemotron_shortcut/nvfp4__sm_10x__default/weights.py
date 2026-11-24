@@ -165,7 +165,7 @@ def _check_keys(core, weights):
                 keys.add(part.module() + ".k_scale")
             if part.source.endswith(".self_attn.v_proj.weight"):
                 keys.add(part.module() + ".v_scale")
-    check_checkpoint_keys(weights, keys)
+    check_checkpoint_keys(weights, keys, mtp_enabled=core.mtp_enabled)
 
 
 @torch.no_grad()

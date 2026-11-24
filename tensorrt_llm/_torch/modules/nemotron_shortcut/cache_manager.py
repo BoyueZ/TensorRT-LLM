@@ -4,6 +4,7 @@
 
 import torch
 
+from tensorrt_llm._torch.modules.mamba.cache_manager import Mamba2State
 from tensorrt_llm._torch.pyexecutor.config_utils import (
     build_mamba_kv_cache_params,
     get_nemotron_shortcut_layer_masks,
@@ -11,6 +12,9 @@ from tensorrt_llm._torch.pyexecutor.config_utils import (
 )
 from tensorrt_llm._torch.pyexecutor.kv_cache.kv_cache_manager_v2 import Role
 from tensorrt_llm._torch.pyexecutor.kv_cache.mamba_cache_manager import MambaHybridCacheManagerV2
+from tensorrt_llm._torch.pyexecutor.kv_cache.mamba_cache_manager.common import (
+    _get_local_mamba_cache_layout,
+)
 from tensorrt_llm.bindings import DataType
 from tensorrt_llm.runtime.kv_cache_manager_v2 import BufferConfig
 
@@ -43,6 +47,11 @@ class NemotronShortcutCacheManager(MambaHybridCacheManagerV2):
 
     _supports_mixed_precision_kv = False
 
+    def _initialize_spec_state(self):
+        # GDP records a complete convolution window and recurrent state per
+        # candidate. The executor promotes the accepted pair for each request.
+        return Mamba2State() if self.spec_config is not None else None
+
     def __init__(self, *args, pretrained_config, dtype, **kwargs):
         config = getattr(pretrained_config, "text_config", None) or pretrained_config
         if dtype != DataType.BF16:
@@ -60,8 +69,13 @@ class NemotronShortcutCacheManager(MambaHybridCacheManagerV2):
     def _estimate_attention_cache_cost(cls, model_config, mapping, **kwargs):
         config = model_config.pretrained_config
         config = getattr(config, "text_config", None) or config
-        attention, _ = get_nemotron_shortcut_layer_masks(config)
-        layer_count = sum(attention[layer] for layer in mapping.pp_layers(len(attention)))
+        _, _, layer_count = _get_local_mamba_cache_layout(
+            model_config,
+            mapping,
+            spec_config=kwargs.get("spec_config"),
+            is_draft=kwargs.get("is_draft", False),
+            use_separate_draft_kv_cache=kwargs.get("use_separate_draft_kv_cache", False),
+        )
         # One complete KV head is replicated when TP exceeds the number of KV heads.
         tp = mamba_effective_tp_size(mapping)
         kv_heads = max(1, config.num_key_value_heads // tp)

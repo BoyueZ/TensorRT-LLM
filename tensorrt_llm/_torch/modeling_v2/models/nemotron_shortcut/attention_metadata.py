@@ -7,8 +7,19 @@ from tensorrt_llm._torch.attention.backends.fmha.phased import get_spec_decoding
 from tensorrt_llm._torch.attention.backends.trtllm import TrtllmAttentionMetadata
 
 
-def attention_step_args(md: TrtllmAttentionMetadata, *, decode: bool = False) -> dict:
+def generation_width(num_rows: int, num_requests: int) -> int:
+    """Number of consecutive candidates per generation request in a linear draft."""
+    if not num_requests and not num_rows:
+        return 1
+    if num_requests <= 0 or num_rows < num_requests or num_rows % num_requests:
+        raise ValueError(f"Cannot split {num_rows} generation rows across {num_requests} requests")
+    return num_rows // num_requests
+
+
+def attention_step_args(md: TrtllmAttentionMetadata, *, n_rows: int, decode: bool = False) -> dict:
     """Build thop_attention arguments, skipping context counts for pure decode."""
+    num_contexts = 0 if decode else md.num_contexts
+    num_ctx_tokens = 0 if decode else md.num_ctx_tokens
     return dict(
         sequence_length=md.kv_lens_cuda_runtime,
         host_past_key_value_lengths=md.kv_lens_runtime,
@@ -24,8 +35,11 @@ def attention_step_args(md: TrtllmAttentionMetadata, *, decode: bool = False) ->
         max_num_requests=md.max_num_requests,
         max_context_length=md.max_context_length,
         max_seq_len=md.max_seq_len,
-        num_contexts=0 if decode else md.num_contexts,
-        num_ctx_tokens=0 if decode else md.num_ctx_tokens,
+        num_contexts=num_contexts,
+        num_ctx_tokens=num_ctx_tokens,
+        predicted_tokens_per_seq=generation_width(
+            n_rows - num_ctx_tokens, md.num_seqs - num_contexts
+        ),
         trtllm_gen_jit_warmup=md.trtllm_gen_jit_warmup,
         use_paged_context_fmha=md.use_paged_context_fmha,
         beam_width=md.effective_beam_width,

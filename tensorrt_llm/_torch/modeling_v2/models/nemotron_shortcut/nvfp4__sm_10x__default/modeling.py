@@ -7,7 +7,7 @@ import torch
 from tensorrt_llm._torch.modeling_v2 import disable_v2_by_default
 
 from ..decoder import ShortcutDecoder, ShortcutForCausalLM
-from ..manifest import _SKIPPED_PREFIXES, _manifest
+from ..manifest import _manifest, excluded_prefixes
 from .ops import grouped_experts
 from .weights import load, projection_parts
 
@@ -24,7 +24,8 @@ class MixedDecoder(ShortcutDecoder):
         used = {"lm_head"}
         for parts in self.projections.values():
             used.update(part.source.rsplit(".", 1)[0] for part in parts)
-        extra = {key for key in self.recipe if not key.startswith(_SKIPPED_PREFIXES)} - used
+        ignored = excluded_prefixes(self.mtp_enabled)
+        extra = {key for key in self.recipe if not key.startswith(ignored)} - used
         if extra:
             raise ValueError(f"Unexpected ModelOpt text projection rules: {sorted(extra)[:8]}")
 

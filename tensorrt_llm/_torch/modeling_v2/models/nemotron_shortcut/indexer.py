@@ -13,6 +13,7 @@ import triton
 from tensorrt_llm._torch.modeling_v2.catalog.attention.thop_attention import thop_attention
 from tensorrt_llm._utils import maybe_pin_memory
 
+from .attention_metadata import generation_width
 from .ops.attention.index_key_store import index_key_store
 from .ops.attention.index_topk_rows import index_topk_rows
 
@@ -169,7 +170,7 @@ class IndexPlan:
 
 
 class IndexState:
-    """Index-key cache binding and persistent selection buffers for single-token generation."""
+    """Index-key cache binding and persistent selection buffers for generation."""
 
     def __init__(self, topk: int, layers: list[int], num_sms: int, *, index_dim: int):
         if topk <= 0 or topk % 4:
@@ -184,7 +185,8 @@ class IndexState:
 
     def bind(self, md, device: torch.device) -> None:
         """Allocate decode buffers during profiling so KV-cache sizing accounts for the memory."""
-        rows, width = md.max_num_sequences, md.max_seq_len
+        rows = md.max_num_sequences * (1 + (md.max_total_draft_tokens or 0))
+        width = md.max_seq_len
         self._rows = torch.arange(rows, dtype=torch.int32, device=device)
         if width <= self.topk:
             self._buffers = None
@@ -265,15 +267,28 @@ class IndexState:
             passes,
         )
 
+    def plan(self, md, n_rows: int) -> IndexPlan:
+        if md.num_contexts:
+            return self.prefill_plan(md, n_rows)
+        return self.decode_plan(md, n_rows)
+
     def decode_plan(self, md, n_rows: int) -> IndexPlan:
         """Build a graph-capturable generation plan using device-resident runtime lengths."""
-        if n_rows != md.num_seqs:
-            raise ValueError("Single-token decoding requires one input row per sequence")
         if self._rows is None:
             raise RuntimeError("IndexState.bind must run before decoding")
+        if n_rows > self._rows.numel():
+            raise ValueError(f"{n_rows} generation rows exceed the reserved index buffers")
+        width_per_request = generation_width(n_rows, md.num_seqs)
         layout = self._cache_layout(md)
-        requests = self._rows[:n_rows]
-        positions = (md.kv_lens_cuda_runtime[:n_rows] - 1).to(torch.int32)
+        rows = self._rows[:n_rows]
+        if width_per_request == 1:
+            requests = rows
+            positions = (md.kv_lens_cuda_runtime[:n_rows] - 1).to(torch.int32)
+        else:
+            requests = rows // width_per_request
+            positions = (
+                md.kv_lens_cuda_runtime[requests] - width_per_request + rows % width_per_request
+            )
         buffers = self._buffers
         passes = []
         if buffers is not None:
@@ -287,7 +302,7 @@ class IndexState:
                     _Pass(
                         start,
                         end,
-                        requests[:size],
+                        rows[:size],
                         sizes[:size],
                         splits,
                         width,

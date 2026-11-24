@@ -3,7 +3,12 @@
 """Rank-local tensor windows shared by the text decoder weight loaders."""
 
 _PREFIX = "model.language_model."
-_SKIPPED_PREFIXES = ("model.vision_tower.", "model.multi_modal_projector.", _PREFIX + "mtp.")
+_MTP_PREFIX = _PREFIX + "mtp.layers.0."
+
+
+def excluded_prefixes(mtp_enabled):
+    prefixes = ("model.vision_tower.", "model.multi_modal_projector.")
+    return prefixes if mtp_enabled else (*prefixes, _PREFIX + "mtp.")
 
 
 def _fp32(tensor):
@@ -45,8 +50,9 @@ def output_head_entry(core, head):
     ]
 
 
-def check_checkpoint_keys(weights, expected):
-    provided = {key for key in weights if not key.startswith(_SKIPPED_PREFIXES)}
+def check_checkpoint_keys(weights, expected, *, mtp_enabled):
+    ignored = excluded_prefixes(mtp_enabled)
+    provided = {key for key in weights if not key.startswith(ignored)}
     if expected != provided:
         missing, extra = sorted(expected - provided), sorted(provided - expected)
         raise ValueError(f"Checkpoint manifest mismatch: missing {missing[:8]}, extra {extra[:8]}")
@@ -125,11 +131,10 @@ def _manifest(core):
         }
 
     def moe(dst: str, p: str) -> dict:
-        """The two pre-MoE norms (under block prefix `p`) and the MoE itself."""
+        """The post-mixer norm (under block prefix `p`) and the MoE itself."""
         e = p + "moe."
         el, il, si = core.local_experts, core.expert_inter, core.shared_inter
         return {
-            f"{dst}shortcut_norm": [(p + "shortcut_input_layernorm.weight", None, None, None)],
             f"{dst}pre_moe_norm": [(p + "pre_moe_layernorm.weight", None, None, None)],
             f"{dst}router": [(e + "gate.weight", None, None, None)],
             f"{dst}router_bias": [(e + "gate.e_score_correction_bias", None, None, None)],
@@ -201,8 +206,20 @@ def _manifest(core):
 
         if kind in ("shortcut_moe_attn", "shortcut_moe_gdp"):
             out[f"l{i}_shortcut_read"] = [(p + "shortcut_read.logit", None, None, None)]
+            out[f"l{i}_shortcut_norm"] = [(p + "shortcut_input_layernorm.weight", None, None, None)]
             out.update(moe(f"l{i}_", p))
 
+    if core.mtp_enabled:
+        for name, key in (
+            ("enorm", "enorm"),
+            ("hnorm", "hnorm"),
+            ("eh", "eh_proj"),
+            ("norm_in", "block.input_layernorm"),
+            ("final_norm", "final_layernorm"),
+        ):
+            out[f"mtp_{name}"] = [(_MTP_PREFIX + key + ".weight", None, None, None)]
+        out.update(attention("mtp_", _MTP_PREFIX + "block.self_attn."))
+        out.update(moe("mtp_", _MTP_PREFIX + "block."))
     out["readout"] = [(_PREFIX + "residual_readout.logit", None, None, None)]
     out["final_norm"] = [(_PREFIX + "norm.weight", None, None, None)]
     out["embed"] = [(_PREFIX + "embed_tokens.weight", None, None, None)]

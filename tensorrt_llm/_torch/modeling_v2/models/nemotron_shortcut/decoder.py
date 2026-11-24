@@ -24,7 +24,6 @@ _CALL_CONSTANTS = dict(
     v=None,
     is_fused_qkv=True,
     update_kv_cache=True,
-    predicted_tokens_per_seq=1,
     attention_input_type=0,
     is_mla_enable=False,
     mask_type=1,
@@ -118,6 +117,8 @@ class ShortcutDecoder(DecoderModel):
         self.dp_rank = mapping.tp_rank
         self.kinds = list(cfg.block_types)
         self.num_layers = len(self.kinds)
+        spec = getattr(model_config, "spec_config", None)
+        self.mtp_enabled = spec is not None and spec.spec_dec_mode.is_mtp_eagle_one_model()
         self.hidden = cfg.hidden_size
         self.eps = cfg.rms_norm_eps
         self.streams = cfg.wide_residual_num_streams
@@ -176,10 +177,13 @@ class ShortcutDecoder(DecoderModel):
         self.local_experts = self.num_experts // ep
         self.moe_ep_size, self.moe_ep_rank = ep, mapping.moe_ep_rank
 
+        attention_layers = [i for i, kind in enumerate(self.kinds) if kind == _ATTN_MOE]
+        if self.mtp_enabled:
+            attention_layers.append(self.num_layers)
         self.index = (
             IndexState(
                 self.index_topk,
-                [i for i, kind in enumerate(self.kinds) if kind == _ATTN_MOE],
+                attention_layers,
                 self.num_sms,
                 index_dim=self.index_dim,
             )
@@ -215,7 +219,14 @@ class ShortcutDecoder(DecoderModel):
                 self._declare_matrix(w, f"l{i}_down", (H, self.inter), P)
             if kind in (_ATTN_MOE, _GDP_MOE):
                 w[f"l{i}_shortcut_read"] = P(self.streams, dtype=f32)
+                w[f"l{i}_shortcut_norm"] = P(H)
                 self._declare_moe(w, f"l{i}_", P)
+        if self.mtp_enabled:
+            for name in ("enorm", "hnorm", "norm_in", "final_norm"):
+                w["mtp_" + name] = P(H)
+            self._declare_matrix(w, "mtp_eh", (H, 2 * H), P)
+            self._declare_attention(w, "mtp_", P)
+            self._declare_moe(w, "mtp_", P)
         w["readout"] = P(self.streams, dtype=f32)
         w["final_norm"] = P(H)
         w["embed"] = P(cfg.vocab_size, H)
@@ -239,9 +250,8 @@ class ShortcutDecoder(DecoderModel):
             self._declare_matrix(w, f"{prefix}idx", (2 * self.index_dim, self.hidden), P)
 
     def _declare_moe(self, w: nn.ParameterDict, prefix: str, P) -> None:
-        """The two pre-MoE norms, the router and the latent / shared experts."""
+        """The post-mixer norm, router and latent / shared experts."""
         H = self.hidden
-        w[f"{prefix}shortcut_norm"] = P(H)
         w[f"{prefix}pre_moe_norm"] = P(H)
         self._declare_matrix(w, f"{prefix}router", (self.num_experts, H), P)
         w[f"{prefix}router_bias"] = P(self.num_experts, dtype=torch.float32)
@@ -283,10 +293,18 @@ class ShortcutDecoder(DecoderModel):
                 p["down"] = self._matrix_view(f"l{i}_down")
             if kind in (_ATTN_MOE, _GDP_MOE):
                 p["shortcut_read"] = torch.sigmoid(w[f"l{i}_shortcut_read"])
+                p["shortcut_norm"] = w[f"l{i}_shortcut_norm"]
                 p.update(self._moe_views(f"l{i}_"))
             layers.append(p)
         self._layers = layers
         self._readout = torch.sigmoid(w["readout"])
+        if self.mtp_enabled:
+            self.mtp = {
+                name: w["mtp_" + name] for name in ("enorm", "hnorm", "norm_in", "final_norm")
+            }
+            self.mtp["eh"] = self._matrix_view("mtp_eh")
+            self.mtp.update(self._attention_views("mtp_"))
+            self.mtp.update(self._moe_views("mtp_"))
 
     def _attention_views(self, prefix: str) -> dict:
         views = {"qkv": self._matrix_view(f"{prefix}qkv"), "o": self._matrix_view(f"{prefix}o")}
@@ -296,7 +314,7 @@ class ShortcutDecoder(DecoderModel):
 
     def _moe_views(self, prefix: str) -> dict:
         w = self.w
-        views = {name: w[f"{prefix}{name}"] for name in ("shortcut_norm", "pre_moe_norm")}
+        views = {"pre_moe_norm": w[f"{prefix}pre_moe_norm"]}
         for name in (
             "router",
             "fc1_latent",
@@ -414,7 +432,11 @@ class ShortcutDecoder(DecoderModel):
                 allgather(x, sizes, self.tp_group, self.process_group)
                 for x in (latent, ids, weights)
             ]
-        mixed = self._grouped_experts(
+        # Some recipes keep the repeated draft expert bank in BF16.
+        expert_op = (
+            grouped_experts if isinstance(p["experts_up"], torch.Tensor) else self._grouped_experts
+        )
+        mixed = expert_op(
             latent, ids, weights, p["experts_up"], p["experts_down"], self.moe_ep_rank, self.clamp
         )
         mixed = (
@@ -466,15 +488,11 @@ class ShortcutDecoder(DecoderModel):
         if not self._kv_layer:
             self._bind_cache_layout(md)
         decode = md.num_contexts == 0
-        step = attention_step_args(md, decode=decode)
+        step = attention_step_args(md, n_rows=embedding.shape[0], decode=decode)
         streams = embedding.float()[:, None, :].expand(-1, self.streams, -1)
         plan = None
         if self.index is not None:
-            plan = (
-                self.index.decode_plan(md, embedding.shape[0])
-                if decode
-                else self.index.prefill_plan(md, embedding.shape[0])
-            )
+            plan = self.index.plan(md, embedding.shape[0])
         pending = None
 
         for i, p in enumerate(self._layers):
@@ -523,6 +541,69 @@ class ShortcutForCausalLM(DecoderModelForCausalLM):
             config=model_config,
             hidden_size=cfg.hidden_size,
             vocab_size=cfg.vocab_size,
+        )
+        self.draft_model = None
+        self.spec_worker = None
+        if self.model.mtp_enabled:
+            from tensorrt_llm._torch.speculative import (
+                get_spec_worker,
+                should_use_separate_draft_kv_cache,
+            )
+
+            from .mtp import DraftModel
+
+            spec = model_config.spec_config
+            self.draft_model = DraftModel(self.model, self.lm_head, self.logits_processor)
+            self.spec_worker = get_spec_worker(
+                spec,
+                model_config,
+                model_config.mapping,
+                use_separate_draft_kv_cache=should_use_separate_draft_kv_cache(spec),
+            )
+
+    def forward(
+        self,
+        attn_metadata,
+        input_ids=None,
+        position_ids=None,
+        inputs_embeds=None,
+        return_context_logits=False,
+        spec_metadata=None,
+        lora_params=None,
+        **kwargs,
+    ):
+        if self.spec_worker is None:
+            return super().forward(
+                attn_metadata,
+                input_ids,
+                position_ids,
+                inputs_embeds,
+                return_context_logits,
+                spec_metadata,
+                lora_params,
+                **kwargs,
+            )
+        if spec_metadata is None:
+            raise ValueError("MTP requires speculative decoding metadata.")
+        hidden = self.model(
+            attn_metadata=attn_metadata,
+            input_ids=input_ids,
+            position_ids=position_ids,
+            inputs_embeds=inputs_embeds,
+            lora_params=lora_params,
+        )
+        logits = self.logits_processor(
+            hidden[spec_metadata.gather_ids], self.lm_head, attn_metadata, True
+        )
+        return self.spec_worker(
+            input_ids=input_ids,
+            position_ids=position_ids,
+            hidden_states=hidden,
+            logits=logits,
+            attn_metadata=attn_metadata,
+            spec_metadata=spec_metadata,
+            draft_model=self.draft_model,
+            resource_manager=kwargs.get("resource_manager"),
         )
 
     def load_weights(self, weights, *args, **kwargs):

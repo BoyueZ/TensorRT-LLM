@@ -32,7 +32,7 @@ class Mxfp8Decoder(ShortcutDecoder):
             )
         }
         if not quantized:
-            if len(shape) == 3:
+            if len(shape) == 3 and not name.startswith("mtp_"):
                 raise ValueError(f"The MXFP8 decoder requires quantized routed experts: {name}")
             super()._declare_matrix(weights, name, shape, P)
             return
