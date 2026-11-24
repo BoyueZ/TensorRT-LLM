@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import torch
 
-from ..manifest import _SKIPPED_PREFIXES
+from ..manifest import block_columns, check_checkpoint_keys, copy_checked, load_unquantized
 from .ops import Fp8Projection, Nvfp4Projection
 
 
@@ -98,28 +98,10 @@ def projection_parts(name, shape, entries, recipe):
     return parts
 
 
-def _k_window(window, elements_per_value):
-    if not window or len(window) == 1:
-        return window
-    rows, cols = window
-    if cols.start % elements_per_value or cols.stop % elements_per_value:
-        raise ValueError(f"Cannot shard {cols} on {elements_per_value}-element boundaries")
-    return rows, slice(cols.start // elements_per_value, cols.stop // elements_per_value)
-
-
-def _copy(target, source, key):
-    if source.shape != target.shape or source.dtype != target.dtype:
-        raise ValueError(
-            f"{key}: expected {tuple(target.shape)} {target.dtype}, "
-            f"got {tuple(source.shape)} {source.dtype}"
-        )
-    target.copy_(source, non_blocking=True)
-
-
 def _copy_scalar(weights, key, target):
     # The actual export stores zero-dimensional scales. A lazy safetensors
     # slice accepts an empty index tuple for a scalar, whereas [:] is invalid.
-    _copy(target.reshape(()), weights[key][()], key)
+    copy_checked(target.reshape(()), weights[key][()], key)
 
 
 def _load_projection(part, w, weights):
@@ -155,11 +137,11 @@ def _load_projection(part, w, weights):
             win = win or (slice(None),)
             dest = dst[0] if dst else slice(0, rows)
             key = module + ".weight"
-            _copy(weight[dest], weights[key][_k_window(win, 2 if nvfp4 else 1)], key)
+            copy_checked(weight[dest], weights[key][block_columns(win, 2 if nvfp4 else 1)], key)
             if nvfp4:
                 key = module + ".weight_scale"
-                source = weights[key][_k_window(win, 16)]
-                _copy(linear[dest].view(torch.float8_e4m3fn), source, key)
+                source = weights[key][block_columns(win, 16)]
+                copy_checked(linear[dest].view(torch.float8_e4m3fn), source, key)
         if nvfp4:
             swizzled = torch.ops.trtllm.block_scale_interleave(linear)
             scale.copy_(swizzled.reshape(-1).view(torch.uint8))
@@ -183,12 +165,7 @@ def _check_keys(core, weights):
                 keys.add(part.module() + ".k_scale")
             if part.source.endswith(".self_attn.v_proj.weight"):
                 keys.add(part.module() + ".v_scale")
-    actual = {key for key in weights if not key.startswith(_SKIPPED_PREFIXES)}
-    if keys != actual:
-        raise ValueError(
-            f"Checkpoint manifest mismatch: missing {sorted(keys - actual)[:8]}, "
-            f"extra {sorted(actual - keys)[:8]}"
-        )
+    check_checkpoint_keys(weights, keys)
 
 
 @torch.no_grad()
@@ -200,12 +177,7 @@ def load(model, weights):
             for part in core.projections[name]:
                 _load_projection(part, core.w, weights)
             continue
-        for key, window, rows, transform in entries:
-            source = weights[key][window or (slice(None),)]
-            if transform is not None:
-                source = transform(source)
-            dest = core.w[name] if rows is None else core.w[name][rows]
-            _copy(dest, source, key)
+        load_unquantized(core.w[name], entries, weights)
 
     head = model.lm_head
     if head.weight.dtype != torch.float8_e4m3fn:
@@ -216,7 +188,7 @@ def load(model, weights):
     if width * core.tp_size != core.w["embed"].shape[0]:
         raise ValueError("The vocabulary must divide evenly across output-head ranks")
     start = core.slices["tp_rank"] * width
-    _copy(head.weight, weights["lm_head.weight"][start : start + width], "lm_head.weight")
+    copy_checked(head.weight, weights["lm_head.weight"][start : start + width], "lm_head.weight")
     _copy_scalar(weights, "lm_head.input_scale", head.input_scale)
     _copy_scalar(weights, "lm_head.weight_scale", head.weight_scale)
     head.inv_input_scale.copy_(head.input_scale.reciprocal())

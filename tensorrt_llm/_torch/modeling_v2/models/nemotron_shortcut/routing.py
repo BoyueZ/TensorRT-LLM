@@ -105,6 +105,15 @@ def route(model_config, llm_args, compute_capability):
         from .bf16__sm_10x__default.modeling import ShortcutBf16ForCausalLM
 
         return ShortcutBf16ForCausalLM
+    if quant == QuantAlgo.MXFP8:
+        recipe = model_config.quant_config
+        if "group_size" in recipe.model_fields_set and recipe.group_size not in (None, 32):
+            raise NoTarget("The MXFP8 text decoder requires 32-element scale blocks.")
+        if layout not in _MIXED_LAYOUTS or mapping.world_size == 1:
+            raise NoTarget(f"Unsupported MXFP8 text decoder mapping: {layout}.")
+        from .mxfp8__sm_10x__default.modeling import ShortcutMxfp8ForCausalLM
+
+        return ShortcutMxfp8ForCausalLM
     if quant == QuantAlgo.MIXED_PRECISION:
         if layout not in _MIXED_LAYOUTS:
             raise NoTarget(f"Unsupported mixed-precision text decoder mapping: {layout}.")

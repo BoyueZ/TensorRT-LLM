@@ -16,7 +16,7 @@ from tensorrt_llm.quantization.mode import QuantAlgo
 pytestmark = pytest.mark.cpu_only
 
 
-def _route(quant, world, moe_tp, *, state="auto", stochastic=False, capability=(10, 3)):
+def _route(quant, world, moe_tp, *, state="auto", stochastic=False, capability=(10, 3), **recipe):
     text = NemotronShortcutTextConfig(
         dtype=torch.bfloat16,
         num_attention_heads=8,
@@ -30,7 +30,9 @@ def _route(quant, world, moe_tp, *, state="auto", stochastic=False, capability=(
             world_size=world, tp_size=world, moe_tp_size=moe_tp, moe_ep_size=world // moe_tp
         ),
         quant_config=QuantConfig(
-            quant_algo=quant, kv_cache_quant_algo=QuantAlgo.NVFP4 if quant is not None else None
+            quant_algo=quant,
+            kv_cache_quant_algo=QuantAlgo.NVFP4 if quant is not None else None,
+            **recipe,
         ),
     )
     args = TorchLlmArgs(
@@ -50,6 +52,7 @@ def _route(quant, world, moe_tp, *, state="auto", stochastic=False, capability=(
     [
         (None, "auto", "bf16__sm_10x__default"),
         (QuantAlgo.MIXED_PRECISION, "float32", "nvfp4__sm_10x__default"),
+        (QuantAlgo.MXFP8, "auto", "mxfp8__sm_10x__default"),
     ],
 )
 def test_four_rank_mixed_expert_parallelism_uses_default(quant, state, target):
@@ -60,6 +63,11 @@ def test_four_rank_mixed_expert_parallelism_uses_default(quant, state, target):
 def test_rejects_unqualified_mapping(quant, world):
     with pytest.raises(NoTarget, match="text decoder mapping"):
         _route(quant, world, 2)
+
+
+def test_rejects_explicit_incompatible_mxfp8_scale_block():
+    with pytest.raises(NoTarget, match="32-element scale blocks"):
+        _route(QuantAlgo.MXFP8, 4, 2, group_size=64)
 
 
 @pytest.mark.parametrize("state,stochastic", [("bfloat16", False), ("float32", True)])

@@ -22,6 +22,52 @@ def _cols(start, width):
     return (slice(None), slice(start, start + width))
 
 
+def block_columns(window, elements_per_block):
+    """Map a row or column shard to the equivalent window in a packed matrix."""
+    if not window or len(window) == 1:
+        return window
+    rows, cols = window
+    if cols.step not in (None, 1) or any(
+        bound is not None and bound % elements_per_block for bound in (cols.start, cols.stop)
+    ):
+        raise ValueError(f"Cannot shard {cols} on {elements_per_block}-element boundaries")
+    start = None if cols.start is None else cols.start // elements_per_block
+    stop = None if cols.stop is None else cols.stop // elements_per_block
+    return rows, slice(start, stop)
+
+
+def output_head_entry(core, head):
+    local_vocab = head.shape[0]
+    if local_vocab * core.tp_size != core.w["embed"].shape[0]:
+        raise ValueError("The vocabulary must divide evenly across the output projection ranks.")
+    return [
+        ("lm_head.weight", _rows(core.slices["tp_rank"] * local_vocab, local_vocab), None, None)
+    ]
+
+
+def check_checkpoint_keys(weights, expected):
+    provided = {key for key in weights if not key.startswith(_SKIPPED_PREFIXES)}
+    if expected != provided:
+        missing, extra = sorted(expected - provided), sorted(provided - expected)
+        raise ValueError(f"Checkpoint manifest mismatch: missing {missing[:8]}, extra {extra[:8]}")
+
+
+def copy_checked(target, source, key):
+    if source.shape != target.shape or source.dtype != target.dtype:
+        raise ValueError(
+            f"{key}: expected {target.shape} {target.dtype}, got {source.shape} {source.dtype}"
+        )
+    target.copy_(source, non_blocking=True)
+
+
+def load_unquantized(target, entries, weights):
+    for key, window, rows, transform in entries:
+        source = weights[key][window or (slice(None),)]
+        if transform is not None:
+            source = transform(source)
+        copy_checked(target if rows is None else target[rows], source, key)
+
+
 def _manifest(core):
     """Map parameters to checkpoint keys, source windows, destination rows and transforms."""
     r = core.slices["tp_rank"]
