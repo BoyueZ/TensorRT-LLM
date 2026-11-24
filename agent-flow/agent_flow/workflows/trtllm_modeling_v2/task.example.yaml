@@ -70,6 +70,8 @@ trtllm_repo_path: /path/to/TensorRT-LLM
 # Overrides of the derived Python package names: the family (from `architectures[0]`) and the
 # checkpoint segment (from the directory name).
 # target: {family: qwen3_5, checkpoint_segment: qwen3_5_27b}
+# A shared implementation can name its package directly while each member keeps its own topology.
+# target: {family: qwen3_5, package: qwen3_5_27b__sm_10x__default}
 
 # `full` (default) | `text_only`: a multimodal checkpoint built and gated as a language model.
 # scope: text_only

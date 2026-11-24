@@ -675,11 +675,15 @@ def check_configuration(
         options.setdefault("trust_remote_code", True)
     kind, size = parse_parallel_segment(member or str(task_data["parallel"]))
     size = size or environment.world_size
+    moe_tp = options.get("moe_tensor_parallel_size")
+    moe_ep = options.get("moe_expert_parallel_size")
+    # Mapping infers the other MoE dimension when the case specifies only one.
+    if moe_tp in (None, -1) and moe_ep in (None, -1):
+        options["moe_expert_parallel_size"] = size if kind in ("tep", "dep") else 1
     options.update(
         model=str(task_data["checkpoint_path"]),
         tensor_parallel_size=size,
         pipeline_parallel_size=1,
-        moe_expert_parallel_size=size if kind in ("tep", "dep") else 1,
         enable_attention_dp=kind == "dep",
     )
     share_batch(options, member or str(task_data["parallel"]), size)
