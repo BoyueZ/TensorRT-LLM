@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Head-sharded Pixtral image tower and replicated learned spatial projector."""
+"""Replicated Pixtral image tower and learned spatial projector."""
 
 from collections.abc import Mapping, Sequence
 
@@ -15,7 +15,7 @@ from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm.inputs.multimodal import MultimodalParams
 
 from .decoder import _rms_norm
-from .manifest import _cols, _rows, load_unquantized
+from .manifest import _rows, load_unquantized
 
 _VISION_PREFIX = "model.vision_tower."
 _PROJECTOR_PREFIX = "model.multi_modal_projector."
@@ -74,8 +74,7 @@ def _merge_patch_major(merge: int):
 def _manifest(vision: "ShortcutVisionFrontend") -> dict:
     """param key -> list of (checkpoint key, source window | None, destination
     rows | None, transform | None), the form of the targets' weight tables."""
-    r = vision.tp_rank
-    hd, il = vision.local_heads * vision.head_dim, vision.local_inter
+    hd, il = vision.num_heads * vision.head_dim, vision.intermediate_size
     out = {
         "patch": [(_VISION_PREFIX + "patch_conv.weight", None, None, _flatten_patch_conv)],
         "ln_pre": [(_VISION_PREFIX + "ln_pre.weight", None, None, None)],
@@ -97,28 +96,25 @@ def _manifest(vision: "ShortcutVisionFrontend") -> dict:
         out[f"l{i}_attn_norm"] = [(p + "attention_norm.weight", None, None, None)]
         out[f"l{i}_ffn_norm"] = [(p + "ffn_norm.weight", None, None, None)]
         out[f"l{i}_qkv"] = [
-            (a + f"{name}_proj.weight", _rows(r * hd, hd), _rows(k * hd, hd), None)
+            (a + f"{name}_proj.weight", None, _rows(k * hd, hd), None)
             for k, name in enumerate(("q", "k", "v"))
         ]
-        out[f"l{i}_o"] = [(a + "o_proj.weight", _cols(r * hd, hd), None, None)]
+        out[f"l{i}_o"] = [(a + "o_proj.weight", None, None, None)]
         out[f"l{i}_gate_up"] = [
-            (f + "gate_proj.weight", _rows(r * il, il), _rows(0, il), None),
-            (f + "up_proj.weight", _rows(r * il, il), _rows(il, il), None),
+            (f + "gate_proj.weight", None, _rows(0, il), None),
+            (f + "up_proj.weight", None, _rows(il, il), None),
         ]
-        out[f"l{i}_down"] = [(f + "down_proj.weight", _cols(r * il, il), None, None)]
+        out[f"l{i}_down"] = [(f + "down_proj.weight", None, None, None)]
     return out
 
 
 class ShortcutVisionFrontend(nn.Module):
-    """Encode images under the decoder's head-parallel or request-parallel mapping."""
+    """Produce identical image embeddings on each participating decoder rank."""
 
     def __init__(self, model_config: ModelConfig) -> None:
         super().__init__()
         cfg = model_config.pretrained_config
         vision = cfg.vision_config
-        mapping = model_config.mapping
-        tp = 1 if mapping.enable_attention_dp else mapping.tp_size
-        self.tp_rank = 0 if mapping.enable_attention_dp else mapping.tp_rank
         if (
             vision.model_type != "pixtral"
             or vision.hidden_act != "silu"
@@ -136,12 +132,12 @@ class ShortcutVisionFrontend(nn.Module):
             vision.intermediate_size,
         )
         self.head_dim = vision.head_dim
-        if heads * self.head_dim != hidden or self.head_dim % 4 or heads % tp or inter % tp:
-            raise ValueError(
-                "The vision heads and intermediate dimension must divide across the mapping."
-            )
-        self.local_heads = heads // tp
-        self.local_inter = inter // tp
+        if heads * self.head_dim != hidden or self.head_dim % 4:
+            raise ValueError("Axial vision heads must span the hidden dimension in groups of four.")
+        # Reducing sharded BF16 image projections changes the checkpoint's feature rows.
+        # Keep the vision tower whole; the text decoder owns its parallel mapping.
+        self.num_heads = heads
+        self.intermediate_size = inter
         self.num_layers = vision.num_hidden_layers
         self.patch = vision.patch_size
         self.merge_size = cfg.spatial_merge_size
@@ -149,10 +145,7 @@ class ShortcutVisionFrontend(nn.Module):
         self.theta = vision.rope_parameters["rope_theta"]
         self.proj_eps = cfg.projector_norm_eps
         self.act = ACT2FN[cfg.projector_hidden_act]
-        self.reduce = None
-        self.tp_size = tp
         text_width = cfg.text_config.hidden_size
-        hd = self.local_heads * self.head_dim
 
         def parameter(*shape):
             return nn.Parameter(torch.empty(*shape, dtype=torch.bfloat16), requires_grad=False)
@@ -172,11 +165,11 @@ class ShortcutVisionFrontend(nn.Module):
             self.w.update(
                 {
                     prefix + "attn_norm": parameter(hidden),
-                    prefix + "qkv": parameter(3 * hd, hidden),
-                    prefix + "o": parameter(hidden, hd),
+                    prefix + "qkv": parameter(3 * hidden, hidden),
+                    prefix + "o": parameter(hidden, hidden),
                     prefix + "ffn_norm": parameter(hidden),
-                    prefix + "gate_up": parameter(2 * self.local_inter, hidden),
-                    prefix + "down": parameter(hidden, self.local_inter),
+                    prefix + "gate_up": parameter(2 * self.intermediate_size, hidden),
+                    prefix + "down": parameter(hidden, self.intermediate_size),
                 }
             )
         self.register_buffer("rotary_table", None, persistent=False)
@@ -196,13 +189,10 @@ class ShortcutVisionFrontend(nn.Module):
         with torch.device(self.w["patch"].device):
             self.rotary_table = axial_cos_sin_table(self.side, self.head_dim, self.theta)
 
-    def _sum(self, x: torch.Tensor) -> torch.Tensor:
-        return x if self.tp_size == 1 else self.reduce(x)
-
     def _attention(self, x, prefix, cosine, sine):
         packed = F.linear(x, self.w[prefix + "qkv"])
         q, k, v = (
-            t.reshape(-1, self.local_heads, self.head_dim).transpose(0, 1)[None]
+            t.reshape(-1, self.num_heads, self.head_dim).transpose(0, 1)[None]
             for t in packed.chunk(3, dim=-1)
         )
         q, k = apply_rotary_pos_emb(q, k, cosine, sine, unsqueeze_dim=0)
@@ -214,7 +204,7 @@ class ShortcutVisionFrontend(nn.Module):
             probs = scores.softmax(dim=-1, dtype=torch.float32).to(v.dtype)
             outputs.append(probs @ v)
         attention = torch.cat(outputs, dim=-2).squeeze(0).transpose(0, 1).reshape(x.shape[0], -1)
-        return self._sum(F.linear(attention, self.w[prefix + "o"]))
+        return F.linear(attention, self.w[prefix + "o"])
 
     def patch_embeddings(self, patches: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
         """Apply the checkpoint's strided convolution to its reconstructed RGB image."""
@@ -233,7 +223,7 @@ class ShortcutVisionFrontend(nn.Module):
         x = x + self._attention(normalized, prefix, cosine, sine)
         normalized = _rms_norm(x, self.w[prefix + "ffn_norm"], _PIXTRAL_EPS)
         gate, up = F.linear(normalized, self.w[prefix + "gate_up"]).chunk(2, dim=-1)
-        return x + self._sum(F.linear(F.silu(gate) * up, self.w[prefix + "down"]))
+        return x + F.linear(F.silu(gate) * up, self.w[prefix + "down"])
 
     def encode_tower(self, patches, size):
         """Return pre-projector features in merge order for one image."""

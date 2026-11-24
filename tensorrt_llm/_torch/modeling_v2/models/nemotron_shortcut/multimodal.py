@@ -36,7 +36,6 @@ class ShortcutMedia:
         super().__init__(model_config)
         media = model_config.pretrained_config.get_media_config()
         self.vision = ShortcutVisionFrontend(model_config.copy_with(pretrained_config=media))
-        self.vision.reduce = self.model._allreduce
         self.dtype = self.model.w["embed"].dtype
         self._token_embeddings = _TokenEmbeddings(self.model)
         self._image_token_ids = torch.tensor([media.image_token_id], dtype=torch.int, device="cpu")
