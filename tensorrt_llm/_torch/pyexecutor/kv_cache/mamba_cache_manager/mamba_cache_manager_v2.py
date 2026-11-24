@@ -190,6 +190,7 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
         is_estimating_kv_cache: bool = False,
         is_draft: bool = False,
         conv_state_layout: Literal["x_b_c", "q_k_v"] = "x_b_c",
+        conv_section_widths: Optional[List[int]] = None,
         **kwargs,
     ) -> None:
         """See the class docstring."""
@@ -295,7 +296,15 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
             self.ssm_state_shape = [nheads, mamba_head_dim, mamba_d_state]
             # TP-mismatch disaggregated transfers split the flat convolution
             # state at the semantic boundaries selected by the layout.
-            if conv_state_layout == "x_b_c":
+            if conv_section_widths is not None:
+                if sum(conv_section_widths) != conv_dim * tp_size or any(
+                    width <= 0 or width % tp_size for width in conv_section_widths
+                ):
+                    raise ValueError(
+                        "Convolution sections must cover the global width and divide over TP"
+                    )
+                self.conv_section_dims = [width // tp_size for width in conv_section_widths]
+            elif conv_state_layout == "x_b_c":
                 self.conv_section_dims = [
                     d_inner_local,
                     grouped_state_dim_local,

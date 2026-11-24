@@ -200,8 +200,9 @@ def engine_kv_cache_quant_algo(config: "ModelConfig", llm_args: "TorchLlmArgs"):
 
     The loader resolves the target before `validate_and_set_kv_cache_quant`
     applies `kv_cache_config.dtype` to the config, so this applies the same
-    rule here: ``auto`` keeps the checkpoint's algorithm, ``fp8`` and
-    ``nvfp4`` replace it. Any other dtype comes back as the string given, so a
+    rule here: ``auto`` keeps the checkpoint's algorithm, ``bfloat16`` selects
+    unquantized pages, and ``fp8`` and ``nvfp4`` select quantized pages.
+    Any other dtype comes back as the string given, so a
     route refuses it by name: ``fp8_ds_mla`` is FP8 to the loader but also
     selects a packed sparse-MLA cache layout, and an unknown dtype is one the
     loader raises on later.
@@ -212,7 +213,7 @@ def engine_kv_cache_quant_algo(config: "ModelConfig", llm_args: "TorchLlmArgs"):
     if dtype == "auto":
         algo = config.quant_config.kv_cache_quant_algo
         return None if algo is None else QuantAlgo(algo)
-    return {"fp8": QuantAlgo.FP8, "nvfp4": QuantAlgo.NVFP4}.get(dtype, dtype)
+    return {"bfloat16": None, "fp8": QuantAlgo.FP8, "nvfp4": QuantAlgo.NVFP4}.get(dtype, dtype)
 
 
 #: The wildcard a target lists in ``moe_impls_honored`` / ``draft_moe_impls_honored`` to honor any

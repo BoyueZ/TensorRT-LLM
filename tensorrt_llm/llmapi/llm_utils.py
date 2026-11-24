@@ -95,10 +95,11 @@ class ModelLoader:
                                                      None)
         if hf_kv_cache_quant_algo is not None:
             hf_kv_cache_quant_algo = QuantAlgo(hf_kv_cache_quant_algo)
-            if explicit_kv_cache_quant_algo is not None:
+            if (explicit_kv_cache_quant_algo is not None
+                    or self.llm_args.kv_cache_config.dtype == "bfloat16"):
                 if explicit_kv_cache_quant_algo != hf_kv_cache_quant_algo:
                     logger.warning(
-                        f"Overriding checkpoint kv_cache_quant_algo={hf_kv_cache_quant_algo} with explicit kv_cache_config.dtype={explicit_kv_cache_quant_algo}."
+                        f"Overriding checkpoint kv_cache_quant_algo={hf_kv_cache_quant_algo} with explicit kv_cache_config.dtype={self.llm_args.kv_cache_config.dtype}."
                     )
                 quant_config.kv_cache_quant_algo = explicit_kv_cache_quant_algo
             elif quant_config.kv_cache_quant_algo is None:
@@ -262,6 +263,8 @@ class ModelLoader:
             elif hf_quant_config.get("quant_method") == "compressed-tensors":
                 update_quant_config_from_compressed_tensors(
                     quant_config, hf_quant_config)
+                if kv_cache_dtype == "bfloat16":
+                    quant_config.kv_cache_quant_algo = None
             elif hf_quant_config.get("quant_method") == "nvfp4":
                 quant_config.quant_algo = QuantAlgo.NVFP4
                 group_size = hf_quant_config.get("group_size", 16)

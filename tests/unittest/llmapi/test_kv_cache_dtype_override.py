@@ -48,9 +48,10 @@ def _compressed_tensors_nvfp4_config(**overrides):
     return config
 
 
-def test_get_llm_args_plumbs_kv_cache_dtype():
-    llm_args, _ = get_llm_args(model="dummy", kv_cache_dtype="nvfp4", gpus_per_node=1)
-    assert llm_args["kv_cache_config"].dtype == "nvfp4"
+@pytest.mark.parametrize("dtype", ["nvfp4", "bfloat16"])
+def test_get_llm_args_plumbs_kv_cache_dtype(dtype):
+    llm_args, _ = get_llm_args(model="dummy", kv_cache_dtype=dtype, gpus_per_node=1)
+    assert llm_args["kv_cache_config"].dtype == dtype
 
 
 def test_kv_cache_config_dtype_validation():
@@ -124,6 +125,14 @@ def test_update_from_hf_quant_config_fp8_ds_mla_overrides(tmp_path):
 
     assert model_loader._update_from_hf_quant_config() is True
     assert llm_args.quant_config.kv_cache_quant_algo == QuantAlgo.FP8
+
+
+def test_bfloat16_cache_preserves_checkpoint_weight_precision(tmp_path):
+    _write_hf_quant_config(tmp_path, kv_cache_quant_algo="NVFP4")
+    llm_args = TorchLlmArgs(model=str(tmp_path), kv_cache_config=KvCacheConfig(dtype="bfloat16"))
+    assert ModelLoader(llm_args)._update_from_hf_quant_config()
+    assert llm_args.quant_config.quant_algo == QuantAlgo.FP8
+    assert llm_args.quant_config.kv_cache_quant_algo is None
 
 
 def test_update_from_hf_quant_config_parses_compressed_tensors_model_kwargs(tmp_path):

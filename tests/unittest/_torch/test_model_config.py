@@ -277,6 +277,23 @@ def _make_mixed_precision_model_config():
     )
 
 
+def test_bfloat16_cache_overrides_all_mixed_precision_layers():
+    model_config = _make_mixed_precision_model_config()
+    model_config.pretrained_config = make_pretrained_config(head_dim=4)
+    model_config.pretrained_config.torch_dtype = torch.bfloat16
+    layers = model_config.quant_config_dict
+    weight_algorithms = {name: layer.quant_algo for name, layer in layers.items()}
+    for quant in (model_config.quant_config, *layers.values()):
+        quant.kv_cache_quant_algo = QuantAlgo.NVFP4
+
+    validate_and_set_kv_cache_quant(model_config, "bfloat16")
+
+    assert model_config.quant_config.quant_algo == QuantAlgo.MIXED_PRECISION
+    assert model_config.quant_config.kv_cache_quant_algo is None
+    assert all(layer.kv_cache_quant_algo is None for layer in layers.values())
+    assert {name: layer.quant_algo for name, layer in layers.items()} == weight_algorithms
+
+
 def test_validate_and_set_kv_cache_quant_propagates_to_quant_config_dict():
     """Explicit kv_cache_config.dtype must override the per-layer QuantConfigs
     too, otherwise the KV pool (sized from the global config) and attention

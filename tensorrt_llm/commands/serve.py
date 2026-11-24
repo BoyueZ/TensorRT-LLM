@@ -1488,10 +1488,10 @@ def launch_visual_gen_server(
                   status="beta")
 @stability_option(
     "--kv_cache_dtype",
-    type=click.Choice(("auto", "fp8", "nvfp4")),
+    type=click.Choice(("auto", "bfloat16", "fp8", "nvfp4")),
     default="auto",
-    help="KV cache quantization dtype for PyTorch backend. "
-    "'auto' uses checkpoint/model metadata; explicit values force override.",
+    help="KV cache dtype for the PyTorch backend. 'auto' uses the checkpoint "
+    "metadata. 'bfloat16' requests unquantized pages for BF16 models.",
     status="prototype")
 @stability_option("--num_postprocess_workers",
                   type=int,

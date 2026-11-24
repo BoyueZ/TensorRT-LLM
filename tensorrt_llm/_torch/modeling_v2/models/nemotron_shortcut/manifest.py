@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Rank-local tensor windows shared by the text decoder weight loaders."""
+
+_PREFIX = "model.language_model."
+_SKIPPED_PREFIXES = ("model.vision_tower.", "model.multi_modal_projector.", _PREFIX + "mtp.")
+
+
+def _fp32(tensor):
+    return tensor.float()
+
+
+def _squeeze_conv(tensor):
+    return tensor.squeeze(1)
+
+
+def _rows(start, width):
+    return (slice(start, start + width),)
+
+
+def _cols(start, width):
+    return (slice(None), slice(start, start + width))
+
+
+def _manifest(core):
+    """Map parameters to checkpoint keys, source windows, destination rows and transforms."""
+    r = core.slices["tp_rank"]
+    expert_rank = core.slices["moe_ep_rank"]
+    moe_tp_rank = core.slices["moe_tp_rank"]
+    tp = core.tp_size
+    nh = core.gdp_heads
+    hv_l, gk_l = core.gdp_v, core.gdp_k
+    hd, di = core.head_dim, core.index_dim
+
+    # Each rank takes the same head window from every Householder slot.
+    conv_sections = [hv_l] * core.m + [gk_l] * (core.m + 1)
+    projection_sections = [hv_l, *conv_sections, *([nh] * (core.m + 1))]
+
+    def segment_windows(key, widths, transform=None):
+        windows = []
+        offset = 0
+        for width in widths:
+            source = _rows(offset * tp + r * width, width)
+            windows.append((key, source, _rows(offset, width), transform))
+            offset += width
+        return windows
+
+    def connection(i: int, conn: str, ckpt: str) -> dict:
+        p = f"{_PREFIX}layers.{i}.{ckpt}."
+        return {
+            f"l{i}_{conn}_read": [(p + "read_logit", None, None, None)],
+            f"l{i}_{conn}_write": [(p + "write_logit", None, None, None)],
+            f"l{i}_{conn}_retain": [(p + "retention_logit", None, None, None)],
+        }
+
+    def attention(dst: str, a: str) -> dict:
+        q_w, kv_w = core.heads_q * hd, core.heads_kv * hd
+        # KV heads split like the query heads when there are at least tp of
+        # them; otherwise adjacent ranks replicate a single KV head.
+        kv_src = (r * core.heads_kv_global // tp) * hd
+        return {
+            f"{dst}qkv": [
+                (a + "q_proj.weight", _rows(r * q_w, q_w), _rows(0, q_w), None),
+                (a + "k_proj.weight", _rows(kv_src, kv_w), _rows(q_w, kv_w), None),
+                (a + "v_proj.weight", _rows(kv_src, kv_w), _rows(q_w + kv_w, kv_w), None),
+            ],
+            f"{dst}o": [(a + "o_proj.weight", _cols(r * q_w, q_w), None, None)],
+            # The indexer's one query and one key head, replicated like the KV head.
+            **(
+                {
+                    f"{dst}idx": [
+                        (a + "indexer.q_proj.weight", None, _rows(0, di), None),
+                        (a + "indexer.k_proj.weight", None, _rows(di, di), None),
+                    ]
+                }
+                if core.index_topk is not None
+                else {}
+            ),
+        }
+
+    def moe(dst: str, p: str) -> dict:
+        """The two pre-MoE norms (under block prefix `p`) and the MoE itself."""
+        e = p + "moe."
+        el, il, si = core.local_experts, core.expert_inter, core.shared_inter
+        return {
+            f"{dst}shortcut_norm": [(p + "shortcut_input_layernorm.weight", None, None, None)],
+            f"{dst}pre_moe_norm": [(p + "pre_moe_layernorm.weight", None, None, None)],
+            f"{dst}router": [(e + "gate.weight", None, None, None)],
+            f"{dst}router_bias": [(e + "gate.e_score_correction_bias", None, None, None)],
+            f"{dst}fc1_latent": [(e + "fc1_latent_proj.weight", None, None, None)],
+            f"{dst}fc2_norm": [(e + "fc2_norm.weight", None, None, None)],
+            f"{dst}fc2_latent": [(e + "fc2_latent_proj.weight", None, None, None)],
+            f"{dst}experts_up": [
+                (
+                    e + "experts.up_proj",
+                    (
+                        slice(expert_rank * el, (expert_rank + 1) * el),
+                        slice(moe_tp_rank * il, (moe_tp_rank + 1) * il),
+                    ),
+                    None,
+                    None,
+                )
+            ],
+            f"{dst}experts_down": [
+                (
+                    e + "experts.down_proj",
+                    (
+                        slice(expert_rank * el, (expert_rank + 1) * el),
+                        slice(None),
+                        slice(moe_tp_rank * il, (moe_tp_rank + 1) * il),
+                    ),
+                    None,
+                    None,
+                )
+            ],
+            f"{dst}shared_up": [
+                (e + "shared_experts.up_proj.weight", _rows(r * si, si), None, None)
+            ],
+            f"{dst}shared_down": [
+                (e + "shared_experts.down_proj.weight", _cols(r * si, si), None, None)
+            ],
+        }
+
+    out: dict = {}
+    for i, kind in enumerate(core.kinds):
+        p = f"{_PREFIX}layers.{i}."
+        out[f"l{i}_norm_in"] = [(p + "input_layernorm.weight", None, None, None)]
+        if kind in ("linear_attention", "mlp"):
+            out.update(connection(i, "res", "residual_connection"))
+        else:
+            out.update(connection(i, "mix", "mixer_residual_connection"))
+            out.update(connection(i, "moe", "moe_residual_connection"))
+
+        if kind in ("linear_attention", "shortcut_moe_gdp"):
+            g = p + "mixer."
+            out[f"l{i}_gdp_in"] = segment_windows(g + "in_proj.weight", projection_sections)
+            out[f"l{i}_gdp_conv"] = segment_windows(
+                g + "conv1d.weight", conv_sections, _squeeze_conv
+            )
+            out[f"l{i}_gdp_a_log"] = [(g + "A_log", _rows(r * nh, nh), None, None)]
+            out[f"l{i}_gdp_dt_bias"] = [(g + "dt_bias", _rows(r * nh, nh), None, _fp32)]
+            out[f"l{i}_gdp_norm"] = [(g + "norm.weight", _rows(r * hv_l, hv_l), None, None)]
+            out[f"l{i}_gdp_out"] = [(g + "out_proj.weight", _cols(r * hv_l, hv_l), None, None)]
+
+        if kind == "shortcut_moe_attn":
+            out.update(attention(f"l{i}_", p + "self_attn."))
+
+        if kind == "mlp":
+            out[f"l{i}_up"] = [
+                (p + "mlp.up_proj.weight", _rows(r * core.inter, core.inter), None, None)
+            ]
+            out[f"l{i}_down"] = [
+                (p + "mlp.down_proj.weight", _cols(r * core.inter, core.inter), None, None)
+            ]
+
+        if kind in ("shortcut_moe_attn", "shortcut_moe_gdp"):
+            out[f"l{i}_shortcut_read"] = [(p + "shortcut_read.logit", None, None, None)]
+            out.update(moe(f"l{i}_", p))
+
+    out["readout"] = [(_PREFIX + "residual_readout.logit", None, None, None)]
+    out["final_norm"] = [(_PREFIX + "norm.weight", None, None, None)]
+    out["embed"] = [(_PREFIX + "embed_tokens.weight", None, None, None)]
+
+    return out
