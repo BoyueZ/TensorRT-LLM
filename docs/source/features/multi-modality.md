@@ -106,13 +106,11 @@ for processor metadata, payload selection, model hooks, and encoder/prefill hand
 
 ## Optional dependencies
 
-Video input decoding uses OpenCV (`cv2`) and is not installed by default. Install it only for models with video inputs:
+Video decoding and Nemotron Shortcut image preprocessing use OpenCV (`cv2`). Install the headless package with the following command.
 
 ```bash
 pip install opencv-python-headless
 ```
-
-Image-only and text-only workflows do not require this package.
 
 ## Examples
 

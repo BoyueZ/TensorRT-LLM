@@ -250,6 +250,7 @@ class ModelEngine:
             tokenizer=None,
             checkpoint_format=llm_args.checkpoint_format,
             trust_remote_code=llm_args.trust_remote_code,
+            disable_mm_encoder=llm_args.disable_mm_encoder,
             **input_processor_kwargs,
         )
         return configured_encoder_max_num_tokens

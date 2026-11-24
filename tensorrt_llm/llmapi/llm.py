@@ -2221,6 +2221,7 @@ class _TorchLLM(BaseLLM):
             trust_remote_code=self.args.trust_remote_code,
             enable_tokenization_cache=self.args.enable_tokenization_cache,
             prompt_token_cache_config=self.args.prompt_token_cache_config,
+            disable_mm_encoder=self.args.disable_mm_encoder,
             **input_processor_kwargs)
         self._tokenizer = self.input_processor.tokenizer
 

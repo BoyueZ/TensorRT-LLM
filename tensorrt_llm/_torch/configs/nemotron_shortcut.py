@@ -3,6 +3,7 @@
 """Checkpoint configuration for the Nemotron Shortcut decoder."""
 
 from transformers.configuration_utils import PretrainedConfig
+from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
 
 _MIXER_TYPES = {
     "linear_attention": "linear_attention",
@@ -40,6 +41,22 @@ class NemotronShortcutTextConfig(PretrainedConfig):
     model_type = "nemotron4_text"
     base_config_key = "text_config"
     causal_lm_architecture = "NemotronShortcutForCausalLM"
+    media_config: dict | None = None
+
+    def get_media_config(self):
+        if not self.media_config:
+            return None
+        return NemotronShortcutConfig(text_config=self, dtype=self.dtype, **self.media_config)
+
+    def get_input_processor_model(self):
+        config = self.get_media_config()
+        if config is None:
+            return None
+        from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.multimodal import (
+            ShortcutMedia,
+        )
+
+        return config, ShortcutMedia
 
     layer_types: list[str] | None = None
     block_types: list[str] | None = None
@@ -128,8 +145,9 @@ class NemotronShortcutConfig(PretrainedConfig):
     """Composite checkpoint wrapper exposing the decoder via get_text_config()."""
 
     model_type = "nemotron4"
-    sub_configs = {"text_config": NemotronShortcutTextConfig}
+    sub_configs = {"text_config": NemotronShortcutTextConfig, "vision_config": PixtralVisionConfig}
     text_config: dict | NemotronShortcutTextConfig | None = None
+    vision_config: dict | PixtralVisionConfig | None = None
     tie_word_embeddings: bool = False
 
     def __post_init__(self, **kwargs):
@@ -137,6 +155,8 @@ class NemotronShortcutConfig(PretrainedConfig):
             self.text_config = NemotronShortcutTextConfig()
         elif isinstance(self.text_config, dict):
             self.text_config = NemotronShortcutTextConfig(**self.text_config)
+        if isinstance(self.vision_config, dict):
+            self.vision_config = PixtralVisionConfig.from_dict(self.vision_config)
         super().__post_init__(**kwargs)
         if self.text_config.dtype is None:
             self.text_config.dtype = self.dtype

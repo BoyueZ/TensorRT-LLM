@@ -1230,6 +1230,7 @@ def create_input_processor(
     trust_remote_code: bool = True,
     enable_tokenization_cache: bool = False,
     prompt_token_cache_config: Optional["PromptTokenCacheConfig"] = None,
+    disable_mm_encoder: bool = False,
     **kwargs,
 ) -> Union[InputProcessor, BaseMultimodalInputProcessor]:
     """Create an input processor for a specific model.
@@ -1294,12 +1295,18 @@ def create_input_processor(
     if config is not None:
         try:
             model_cls, _ = get_model_architecture(config)
-            input_processor_cls = INPUT_PROCESSOR_REGISTRY._input_processors_cls_by_model_type \
-                .get(model_cls)
         except (RuntimeError, ConfigInputError,
                 UnsupportedError):  # unregistered model
+            model_cls = None
+        if model_cls is None and not disable_mm_encoder:
+            get_processor_model = getattr(type(config), "get_input_processor_model", None)
+            processor_model = get_processor_model(config) if get_processor_model else None
+            if processor_model is not None:
+                config, model_cls = processor_model
+        if model_cls is None:
             logger.info("Unregistered model, using DefaultInputProcessor")
-            input_processor_cls = None
+        input_processor_cls = INPUT_PROCESSOR_REGISTRY._input_processors_cls_by_model_type \
+            .get(model_cls)
         if input_processor_cls is not None:
             if "vision_gpu_normalize" in kwargs:
                 kwargs["vision_gpu_normalize"] = kwargs[
