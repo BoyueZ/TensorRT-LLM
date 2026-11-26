@@ -136,11 +136,13 @@ class DefaultInputProcessor(InputProcessor):
                  config,
                  tokenizer,
                  trust_remote_code: bool = True,
-                 enable_tokenization_cache: bool = False) -> None:
+                 enable_tokenization_cache: bool = False,
+                 reject_raw_media: bool = False) -> None:
         self.tokenizer = tokenizer
         self.config = config
         self.model_path = model_path
-        self.multimodal_hashing_supported = None
+        self._reject_raw_media = reject_raw_media
+        self.multimodal_hashing_supported = False if reject_raw_media else None
         # None when disabled or the tokenizer cannot support the cache.
         self._prefix_token_cache = (create_prefix_token_cache(tokenizer)
                                     if enable_tokenization_cache else None)
@@ -156,6 +158,15 @@ class DefaultInputProcessor(InputProcessor):
         self, inputs: TextPrompt, sampling_params: SamplingParams
     ) -> Tuple[List[int], Optional[ExtraProcessedInputs]]:
         """The default input processor handles only tokenization."""
+        if self._reject_raw_media:
+            media = inputs.get("multi_modal_data") or {}
+            if any(items is not None and
+                   (not isinstance(items, (list, tuple)) or len(items) > 0)
+                   for items in media.values()):
+                raise ValueError("Raw media cannot be processed with "
+                                 "disable_mm_encoder=True.")
+            if "prompt" not in inputs and "prompt_token_ids" in inputs:
+                return inputs["prompt_token_ids"], None
         token_ids = tokenize_prompt(
             self.tokenizer,
             inputs["prompt"],
@@ -1261,6 +1272,7 @@ def create_input_processor(
     from tensorrt_llm._torch.models import get_model_architecture
 
     config = None
+    reject_raw_media = False
 
     if checkpoint_format in (CheckpointFormat.HF, CheckpointFormat.MX):
         try:
@@ -1295,25 +1307,27 @@ def create_input_processor(
     if config is not None:
         try:
             model_cls, _ = get_model_architecture(config)
-            input_processor_cls = INPUT_PROCESSOR_REGISTRY._input_processors_cls_by_model_type \
-                .get(model_cls)
         except (RuntimeError, ConfigInputError,
                 UnsupportedError):  # unregistered model
             model_cls = None
-            resolve = getattr(type(config), "get_input_processor_cls", None)
-            input_processor_cls = None
-            if resolve is not None:
-                input_processor_cls = resolve(
-                    config, disable_mm_encoder=disable_mm_encoder)
-            if input_processor_cls is None:
-                logger.info("Unregistered model, using DefaultInputProcessor")
+        if model_cls is None:
+            get_processor_model = getattr(type(config), "get_input_processor_model", None)
+            reject_raw_media = get_processor_model is not None and disable_mm_encoder
+            if get_processor_model is not None and not disable_mm_encoder:
+                processor_model = get_processor_model(config)
+                if processor_model is not None:
+                    config, model_cls = processor_model
+        if model_cls is None:
+            logger.info("Unregistered model, using DefaultInputProcessor")
+        input_processor_cls = INPUT_PROCESSOR_REGISTRY._input_processors_cls_by_model_type \
+            .get(model_cls)
         if input_processor_cls is not None:
             if "vision_gpu_normalize" in kwargs:
                 kwargs["vision_gpu_normalize"] = kwargs[
                     "vision_gpu_normalize"] and getattr(
                         model_cls, "supports_vision_gpu_normalize", False)
-            if getattr(input_processor_cls, "supports_tokenization_cache",
-                       False):
+            if (issubclass(input_processor_cls, BaseMultimodalInputProcessor)
+                    and input_processor_cls.supports_tokenization_cache):
                 kwargs["enable_tokenization_cache"] = enable_tokenization_cache
             elif enable_tokenization_cache:
                 logger.warning_once(
@@ -1351,7 +1365,8 @@ def create_input_processor(
         None,
         None,
         tokenizer,
-        enable_tokenization_cache=enable_tokenization_cache)
+        enable_tokenization_cache=enable_tokenization_cache,
+        reject_raw_media=reject_raw_media)
 
 
 def _mm_data_to_counts(mm_data: Dict[str, Any]) -> Dict[str, int]:

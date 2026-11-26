@@ -31,7 +31,6 @@ import transformers
 from transformers.utils import HF_MODULES_CACHE
 
 from tensorrt_llm._errors import ModelLoadError
-from tensorrt_llm._torch.configs.nemotron_shortcut import NemotronShortcutConfig
 from tensorrt_llm._torch.locality_domain.policy import LocalityDomainPolicy
 from tensorrt_llm._torch.pyexecutor.config_utils import (
     get_glm5_next_layer_masks, get_glm5_next_num_attention_layers,
@@ -2092,9 +2091,6 @@ class ModelConfig(Generic[TConfig]):
                             f"Applied model_kwargs: {key}={value_new} (previous value: {target_value})"
                         )
 
-            if isinstance(pretrained_config, NemotronShortcutConfig):
-                model_kwargs = pretrained_config.normalize_model_kwargs(
-                    model_kwargs)
             _recursive_update_config(pretrained_config, model_kwargs)
 
         quant_config = QuantConfig()

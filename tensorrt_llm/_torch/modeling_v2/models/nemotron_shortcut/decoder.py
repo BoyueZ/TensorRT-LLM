@@ -636,8 +636,7 @@ class ShortcutForCausalLM(DecoderModelForCausalLM):
         return "V2"
 
     def __init__(self, model_config):
-        cfg = model_config.pretrained_config.get_text_config()
-        model_config.pretrained_config = cfg
+        cfg = model_config.pretrained_config
         super().__init__(
             self.decoder_cls(model_config),
             config=model_config,

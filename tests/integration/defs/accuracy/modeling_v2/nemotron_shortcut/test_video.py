@@ -18,6 +18,7 @@ def test_checkpoint_video_sampling(model_root, precision, tmp_path):
     import cv2
     from transformers import AutoProcessor, AutoTokenizer
 
+    from tensorrt_llm._torch.pyexecutor.config_utils import load_pretrained_config
     from tensorrt_llm.inputs.media_io import VideoMediaIO
     from tensorrt_llm.inputs.registry import (
         create_input_processor,
@@ -29,7 +30,7 @@ def test_checkpoint_video_sampling(model_root, precision, tmp_path):
         pytest.skip(f"Checkpoint unavailable: {model}")
     tokenizer = AutoTokenizer.from_pretrained(model, trust_remote_code=True)
     processor = create_input_processor(str(model), tokenizer, video_pruning_rate=0.5)
-    assert processor.config.video_temporal_patch_size == 1
+    assert load_pretrained_config(str(model)).get_media_config().video_temporal_patch_size == 1
     text = {"prompt": "A photo of"}
     assert processor({**text, "multi_modal_data": {"video": []}}, SamplingParams()) == processor(
         text, SamplingParams()

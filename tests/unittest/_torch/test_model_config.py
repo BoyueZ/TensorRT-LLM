@@ -32,32 +32,6 @@ from tensorrt_llm.quantization.modelopt_config import read_modelopt_quant_config
 pytestmark = pytest.mark.cpu_only
 
 
-def test_shortcut_composite_preserves_decoder_overrides(tmp_path):
-    from tensorrt_llm._torch.configs.nemotron_shortcut import NemotronShortcutConfig
-
-    checkpoint = {
-        "model_type": NemotronShortcutConfig.model_type,
-        "text_config": {"index_topk": 128, "max_position_embeddings": 4096},
-        "image_token_id": 1,
-    }
-    (tmp_path / "config.json").write_text(json.dumps(checkpoint))
-    config = ModelConfig.from_pretrained(
-        str(tmp_path),
-        moe_backend="CUTLASS",
-        model_kwargs={
-            "index_topk": 64,
-            "max_position_embeddings": 2048,
-            "text_config": {"max_position_embeddings": 1024},
-            "image_token_id": 2,
-        },
-    ).pretrained_config
-    text = config.get_text_config()
-    assert config.index_topk == text.index_topk == 64
-    assert config.max_position_embeddings == text.max_position_embeddings == 1024
-    assert config.image_token_id == 2
-    assert not hasattr(text, "image_token_id")
-
-
 def make_pretrained_config(
     *,
     num_attention_heads: int = 16,

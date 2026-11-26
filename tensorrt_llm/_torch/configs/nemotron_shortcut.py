@@ -43,6 +43,22 @@ class NemotronShortcutTextConfig(PretrainedConfig):
     model_type = "nemotron4_text"
     base_config_key = "text_config"
     causal_lm_architecture = "NemotronShortcutForCausalLM"
+    media_config: dict | None = None
+
+    def get_media_config(self):
+        if not self.media_config:
+            return None
+        return NemotronShortcutConfig(text_config=self, dtype=self.dtype, **self.media_config)
+
+    def get_input_processor_model(self):
+        config = self.get_media_config()
+        if config is None:
+            return None
+        from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.multimodal import (
+            ShortcutMedia,
+        )
+
+        return config, ShortcutMedia
 
     layer_types: list[str] | None = None
     block_types: list[str] | None = None
@@ -126,15 +142,6 @@ class NemotronShortcutTextConfig(PretrainedConfig):
     def gdp_conv_dim(self) -> int:
         return sum(self.gdp_conv_section_widths)
 
-    def get_input_processor_cls(self, *, disable_mm_encoder: bool):
-        if disable_mm_encoder:
-            from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.input_processor import (
-                ShortcutTextInputProcessor,
-            )
-
-            return ShortcutTextInputProcessor
-        return None
-
 
 class NemotronShortcutConfig(PretrainedConfig):
     """Composite checkpoint wrapper exposing the decoder via get_text_config()."""
@@ -144,34 +151,6 @@ class NemotronShortcutConfig(PretrainedConfig):
     text_config: dict | NemotronShortcutTextConfig | None = None
     vision_config: dict | PixtralVisionConfig | None = None
     tie_word_embeddings: bool = False
-
-    @classmethod
-    def from_checkpoint_dict(cls, config: dict, **kwargs):
-        if config["model_type"] == cls.model_type:
-            return cls.from_dict(config, **kwargs)
-
-        # Older flat checkpoints store the vision fields beside the decoder
-        # fields or under media_config when saved from a loaded configuration.
-        flat = config.copy()
-        media = dict(flat.pop("media_config", None) or {})
-        if flat.get("vision_config"):
-            for key in (
-                "vision_config",
-                "vision_feature_layer",
-                "image_token_id",
-                "multimodal_projector_bias",
-                "projector_hidden_act",
-                "projector_norm_eps",
-                "spatial_merge_size",
-                "video_temporal_patch_size",
-                "separate_video_embedder",
-            ):
-                if key in flat:
-                    media[key] = flat.pop(key)
-        text = NemotronShortcutTextConfig.from_dict(flat, **kwargs)
-        if media.get("vision_config") is not None:
-            return cls(text_config=text, dtype=text.dtype, **media)
-        return text
 
     def __post_init__(self, **kwargs):
         if self.text_config is None:
@@ -183,30 +162,3 @@ class NemotronShortcutConfig(PretrainedConfig):
         super().__post_init__(**kwargs)
         if self.text_config.dtype is None:
             self.text_config.dtype = self.dtype
-
-    def get_input_processor_cls(self, *, disable_mm_encoder: bool):
-        if disable_mm_encoder or self.vision_config is None:
-            return self.text_config.get_input_processor_cls(disable_mm_encoder=disable_mm_encoder)
-        # The registered model module also supplies the chat placeholder metadata.
-        from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.multimodal import (
-            ShortcutInputProcessor,
-        )
-
-        return ShortcutInputProcessor
-
-    def normalize_model_kwargs(self, overrides: dict) -> dict:
-        """Apply legacy flat decoder overrides and keep the executor's mirrored fields in sync."""
-        nested = overrides.get("text_config", {})
-        if not isinstance(nested, dict):
-            return overrides
-        decoder = {
-            key: value
-            for key, value in (overrides | nested).items()
-            if hasattr(self.text_config, key) or key == "quantization_config"
-        }
-        mirrored = {
-            key: value
-            for key, value in decoder.items()
-            if key in nested and key not in ("model_type", "architectures")
-        }
-        return {**overrides, **mirrored, "text_config": decoder | nested}

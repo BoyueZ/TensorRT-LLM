@@ -1156,22 +1156,28 @@ def load_pretrained_config(model_name_or_path: str,
             f"(aux_hidden_state_layer_ids - 1) and no sliding window")
     elif model_type in (NemotronShortcutConfig.model_type,
                         NemotronShortcutTextConfig.model_type):
-        model_config = NemotronShortcutConfig.from_checkpoint_dict(
-            config_dict, **kwargs)
-        text = model_config.get_text_config()
-        # Both checkpoint forms use the same V2 route. The frontend needs
-        # the composite model_type and vision_config to process images.
-        text.architectures = [NemotronShortcutTextConfig.causal_lm_architecture]
-        model_config.architectures = text.architectures
-        if text.dtype is None:
-            text.dtype = _resolve_composite_torch_dtype(config_dict)
+        # The decoder uses the same config for dense and quantized weights.
+        text_dict = (config_dict["text_config"] if model_type
+                     == NemotronShortcutConfig.model_type else config_dict)
+        model_config = NemotronShortcutTextConfig.from_dict(text_dict, **kwargs)
+        if config_dict.get("vision_config"):
+            model_config.media_config = {
+                key: config_dict[key]
+                for key in ("vision_config", "vision_feature_layer",
+                            "image_token_id", "multimodal_projector_bias",
+                            "projector_hidden_act", "projector_norm_eps",
+                            "spatial_merge_size", "video_temporal_patch_size")
+                if key in config_dict
+            }
+        model_config.architectures = [
+            NemotronShortcutTextConfig.causal_lm_architecture
+        ]
         if model_config.dtype is None:
-            model_config.dtype = text.dtype
-        quantization = getattr(text, "quantization_config", None)
-        if quantization is None:
-            quantization = getattr(model_config, "quantization_config", None)
-        if quantization is not None:
-            model_config.quantization_config = text.quantization_config = quantization
+            model_config.dtype = _resolve_composite_torch_dtype(config_dict)
+        if (getattr(model_config, "quantization_config", None) is None
+                and "quantization_config" in config_dict):
+            model_config.quantization_config = config_dict[
+                "quantization_config"]
     elif model_type in ("glm5_next", "glm5_next_text"):
         from tensorrt_llm._torch import configs
         config_name = ("Glm5NextConfig"

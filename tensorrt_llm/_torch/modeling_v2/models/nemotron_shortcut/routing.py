@@ -31,8 +31,7 @@ _MIXED_LAYOUTS = _FOUR_RANK_LAYOUTS | {
 def route(model_config, llm_args, compute_capability):
     from tensorrt_llm._torch.pyexecutor.model_loader import effective_mamba_ssm_cache_dtype
 
-    checkpoint = model_config.pretrained_config
-    cfg = checkpoint.get_text_config()
+    cfg = model_config.pretrained_config
     mapping = model_config.mapping
     if compute_capability != (10, 3):
         raise NoTarget("The text decoder requires SM103.")
@@ -62,7 +61,7 @@ def route(model_config, llm_args, compute_capability):
         if spec.use_rejection_sampling:
             # The sampler pads the rejected suffix with -1; the draft embeds every input row.
             raise NoTarget("The repeated prediction layer requires token IDs in every draft row.")
-    if cfg.dtype is not None and cfg.dtype != torch.bfloat16:
+    if model_config.torch_dtype != torch.bfloat16:
         raise NoTarget("The text decoder requires BF16 activations.")
     if engine_kv_cache_quant_algo(model_config, llm_args) is not None:
         raise NoTarget("The text decoder requires BF16 KV pages.")
@@ -123,9 +122,7 @@ def route(model_config, llm_args, compute_capability):
         mapping.moe_tp_size,
         mapping.moe_ep_size,
     )
-    media = (
-        getattr(checkpoint, "vision_config", None) is not None and not llm_args.disable_mm_encoder
-    )
+    media = bool(getattr(cfg, "media_config", None)) and not llm_args.disable_mm_encoder
     quant = model_config.quant_config.quant_algo
     if quant is None:
         if layout not in _FOUR_RANK_LAYOUTS:

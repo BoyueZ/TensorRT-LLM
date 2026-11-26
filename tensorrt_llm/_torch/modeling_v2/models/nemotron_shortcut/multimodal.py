@@ -33,8 +33,8 @@ class ShortcutMedia:
     multimodal_data_device_paths = ("image.patches", "video.patches")
 
     def __init__(self, model_config):
-        media = model_config.pretrained_config
         super().__init__(model_config)
+        media = model_config.pretrained_config.get_media_config()
         self.vision = ShortcutVisionFrontend(model_config.copy_with(pretrained_config=media))
         self.dtype = self.model.w["embed"].dtype
         self._token_embeddings = _TokenEmbeddings(self.model)
