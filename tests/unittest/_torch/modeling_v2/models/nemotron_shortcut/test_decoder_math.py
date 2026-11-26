@@ -58,3 +58,53 @@ def test_prefill_retains_the_clamped_state():
         expected = torch.full_like(state[0], 1e9 * math.exp(-20.0))
         torch.testing.assert_close(state[0], expected, rtol=1e-4, atol=1e-5)
         assert torch.count_nonzero(state[1]) == 0
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() not in ((10, 0), (10, 3)),
+    reason="requires the Blackwell sparse indexer",
+)
+def test_sparse_selection_preserves_logical_order_at_cutoff():
+    from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.ops.attention.index_topk_rows import (
+        index_topk_rows,
+    )
+
+    width, topk, page_size = 2813, 2048, 64
+    pages = math.ceil(width / page_size)
+    with torch.device("cuda"):
+        # The last key wins and the other keys tie. The second row sees only five keys.
+        keys = torch.zeros((pages, page_size, 1, 128), dtype=torch.bfloat16)
+        keys.flatten(0, 1)[width - 1].fill_(1)
+        query = torch.ones((2, 128), dtype=keys.dtype)
+        page = torch.arange(pages, dtype=torch.int32) * 2
+        offsets = torch.stack((page, page + 1)).unsqueeze(0)
+        lengths = torch.tensor([width, 5], dtype=torch.int32)
+        scores = torch.empty((2, width + 3), dtype=torch.float32)[:, :width]
+        indices = torch.empty((2, topk), dtype=torch.int32)
+        out = torch.empty((1, 2, 2, topk), dtype=torch.int32)
+        row = torch.arange(2, dtype=torch.int32)
+        arguments = (
+            query,
+            keys,
+            offsets,
+            2,
+            0,
+            torch.zeros_like(row),
+            lengths,
+            row,
+            torch.ones_like(row),
+            scores,
+            indices,
+            out,
+        )
+        index_topk_rows(*arguments)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            index_topk_rows(*arguments)
+        indices.fill_(-2)
+        graph.replay()
+        expected = torch.full_like(indices, -1)
+        expected[0, :-1] = torch.arange(topk - 1, dtype=torch.int32)
+        expected[0, -1] = width - 1
+        expected[1, :5] = torch.arange(5, dtype=torch.int32)
+        torch.testing.assert_close(indices, expected, atol=0, rtol=0)

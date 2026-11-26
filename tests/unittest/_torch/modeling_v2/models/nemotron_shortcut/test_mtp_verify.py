@@ -124,9 +124,14 @@ def test_gdp_verify_promotes_each_requests_accepted_prefix():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires token-sparse index kernels")
-def test_verify_sparse_queries_see_only_their_own_causal_prefix():
+@pytest.mark.parametrize("case", ["over_topk", "short", "short_mixed"])
+def test_verify_sparse_queries_see_only_their_own_causal_prefix(case):
     batch, width, page_size, topk, dim = 2, 3, 32, 2048, 128
-    blocks = 65
+    long = case == "over_topk"
+    blocks = 65 if long else 2
+    num_contexts = int(case == "short_mixed")
+    seq_lens = torch.tensor([5 if num_contexts else width, width], dtype=torch.int32)
+    kv_lens = torch.tensor([topk + 1, topk + 15] if long else [37, 48], dtype=torch.int32)
     pages = torch.arange(batch * blocks, dtype=torch.int32, device="cuda").reshape(batch, blocks)
     offsets = torch.stack((2 * pages, 2 * pages + 1), dim=1)
     cache = torch.zeros(batch * blocks, page_size, 1, dim, device="cuda", dtype=torch.bfloat16)
@@ -147,30 +152,38 @@ def test_verify_sparse_queries_see_only_their_own_causal_prefix():
         kv_cache_manager=Pages(),
         host_kv_cache_pool_mapping=torch.tensor([[0, 0]]),
         kv_cache_block_offsets=offsets.unsqueeze(0),
-        kv_lens_cuda_runtime=torch.tensor([topk + 1, topk + 15], device="cuda", dtype=torch.int32),
+        seq_lens=seq_lens,
+        seq_lens_cuda=seq_lens.cuda(),
+        kv_lens_runtime=kv_lens,
+        kv_lens_cuda_runtime=kv_lens.cuda(),
         num_seqs=batch,
         max_num_sequences=batch,
         max_seq_len=blocks * page_size,
-        num_contexts=0,
+        num_contexts=num_contexts,
+        num_ctx_tokens=int(seq_lens[0]) if num_contexts else 0,
         max_total_draft_tokens=width - 1,
     )
     state = IndexState(
         topk, [0], torch.cuda.get_device_properties(0).multi_processor_count, index_dim=dim
     )
     state.bind(md, cache.device)
-    plan = state.plan(md, batch * width)
-    query = cache.new_zeros(batch * width, dim)
+    n_rows = int(seq_lens.sum())
+    plan = state.plan(md, n_rows)
+    assert plan.sparse
+    query = cache.new_zeros(n_rows, dim)
     query[:, 0] = 64
     query[:, 1] = 1
     selection = plan.select(0, query)[0]
-    for b, length in enumerate(md.kv_lens_cuda_runtime.tolist()):
-        for t in range(width):
-            end = length - width + t + 1
+    start = 0
+    for b, (length, count) in enumerate(zip(kv_lens.tolist(), seq_lens.tolist())):
+        for t in range(count):
+            end = length - count + t + 1
             expected = torch.arange(max(0, end - topk), end, device="cuda")
-            k, v = selection[b * width + t].long()
+            k, v = selection[start + t].long()
             valid = k >= 0
             assert torch.equal(k < 0, v < 0)
             ordered = k[valid].argsort()
             base = 2 * pages[b, expected // page_size].long() * page_size
             torch.testing.assert_close(k[valid][ordered], base + expected % page_size)
             torch.testing.assert_close(v[valid][ordered], base + page_size + expected % page_size)
+        start += count

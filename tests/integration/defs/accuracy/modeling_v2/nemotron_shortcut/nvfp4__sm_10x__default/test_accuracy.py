@@ -5,3 +5,6 @@ from .._common import _ShortcutTextAccuracy
 
 class TestShortcutNvfp4(_ShortcutTextAccuracy):
     MODEL_NAME = "nemotron_shortcut/nvfp4"
+
+    def test_gsm8k(self):
+        self.evaluate_gsm8k()

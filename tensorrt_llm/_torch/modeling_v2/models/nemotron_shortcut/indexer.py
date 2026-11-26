@@ -15,6 +15,7 @@ from tensorrt_llm._utils import maybe_pin_memory
 
 from .attention_metadata import generation_width
 from .ops.attention.index_key_store import index_key_store
+from .ops.attention.index_pool_rows import index_pool_rows
 from .ops.attention.index_topk_rows import index_topk_rows
 
 _PREFILL_ROWS = 64
@@ -22,8 +23,6 @@ _DECODE_ROWS = 16
 _SCORE_COLS = 64
 _PREFILL_SCORE_BYTES = 256 << 20
 _DECODE_SCORE_BYTES = 1 << 30
-_SPLIT_TOPK_MIN_WIDTH = 200_000
-_TOPK_SPLITS = 10
 
 
 class _Layout:
@@ -60,7 +59,6 @@ class _Pass:
     splits: int
     width: int
     tile_rows: int
-    split_topk: bool = False
 
 
 @dataclass
@@ -68,8 +66,6 @@ class _DecodeBuffers:
     indices: torch.Tensor
     pool_rows: torch.Tensor
     logits: torch.Tensor
-    aux_indices: torch.Tensor | None
-    aux_logits: torch.Tensor | None
 
 
 class IndexPlan:
@@ -85,6 +81,8 @@ class IndexPlan:
         topk: int,
         passes: list[_Pass],
         buffers: _DecodeBuffers | None = None,
+        *,
+        verify_width: int = 1,
     ):
         self.layout = layout
         self.offsets = offsets
@@ -94,8 +92,14 @@ class IndexPlan:
         self.num_ctx_tokens = num_ctx_tokens
         self.topk = topk
         self.passes = passes
-        self.sparse = bool(passes)
         self.buffers = buffers
+        self.causal_indices = None
+        if verify_width > 1 and not passes:
+            # Every key fits. Give each MTP candidate its own causal prefix
+            # even when the history is too short to require score selection.
+            cols = torch.arange(topk, dtype=torch.int32, device=positions.device)
+            self.causal_indices = torch.where(cols < self.lengths[:, None], cols, -1)
+        self.sparse = bool(passes) or self.causal_indices is not None
 
     def store(self, layer: int, keys: torch.Tensor) -> None:
         """Store this layer's [tokens, index_dim] keys, including those from dense steps."""
@@ -110,6 +114,14 @@ class IndexPlan:
 
     def select(self, layer: int, q: torch.Tensor) -> torch.Tensor:
         """Return the selected K and V pool rows shaped [1, tokens, 2, topk]."""
+        if self.causal_indices is not None:
+            return index_pool_rows(
+                self.causal_indices,
+                self.requests,
+                self.offsets,
+                self.layout.layer_in_pool[layer],
+                self.layout.views[layer].shape[1],
+            )
         n = q.shape[0]
         if self.buffers is None:
             out = torch.empty(1, n, 2, self.topk, dtype=torch.int32, device=q.device)
@@ -121,8 +133,11 @@ class IndexPlan:
             rows = slice(work.start, work.end)
             if self.buffers is None:
                 logits = torch.empty(
-                    work.end - work.start, work.width, dtype=torch.float32, device=q.device
-                )
+                    work.end - work.start,
+                    triton.cdiv(work.width, 4) * 4,
+                    dtype=torch.float32,
+                    device=q.device,
+                )[:, : work.width]
             else:
                 logits = self.buffers.logits
             index_topk_rows(
@@ -137,8 +152,6 @@ class IndexPlan:
                 work.tile_sizes,
                 logits,
                 indices[rows],
-                self.buffers.aux_indices if self.buffers is not None and work.split_topk else None,
-                self.buffers.aux_logits if self.buffers is not None and work.split_topk else None,
                 out[:, rows],
                 work.splits,
                 work.tile_rows,
@@ -172,13 +185,22 @@ class IndexPlan:
 class IndexState:
     """Index-key cache binding and persistent selection buffers for generation."""
 
-    def __init__(self, topk: int, layers: list[int], num_sms: int, *, index_dim: int):
+    def __init__(
+        self,
+        topk: int,
+        layers: list[int],
+        num_sms: int,
+        *,
+        index_dim: int,
+        batch_invariant: bool = False,
+    ):
         if topk <= 0 or topk % 4:
             raise ValueError("Token-sparse attention requires a positive top-k divisible by four")
         self.topk = topk
         self.layers = layers
         self.index_dim = index_dim
         self.num_sms = num_sms
+        self.batch_invariant = batch_invariant
         self._layout: _Layout | None = None
         self._rows: torch.Tensor | None = None
         self._buffers: _DecodeBuffers | None = None
@@ -192,17 +214,19 @@ class IndexState:
             self._buffers = None
             return
         score_rows = max(1, min(rows, _DECODE_SCORE_BYTES // (4 * width)))
-        aux_indices = aux_logits = None
-        if width >= _SPLIT_TOPK_MIN_WIDTH:
-            elements = min(score_rows, self.num_sms) * _TOPK_SPLITS * self.topk
-            aux_indices = torch.empty(elements, dtype=torch.int32, device=device)
-            aux_logits = torch.empty(elements, dtype=torch.float32, device=device)
+        from tensorrt_llm._torch.kernels.blackwell.top_k.gvr_topk_decode_self_sampling_host import (
+            warmup_prefill,
+        )
+
+        # Decode uses the same per-row selection rule as prefill. Compile the
+        # deterministic engine before a decode step can enter CUDA graph capture.
+        warmup_prefill(self.topk, width, deterministic=True)
         self._buffers = _DecodeBuffers(
             torch.empty(rows, self.topk, dtype=torch.int32, device=device),
             torch.empty(1, rows, 2, self.topk, dtype=torch.int32, device=device),
-            torch.empty(score_rows, width, dtype=torch.float32, device=device),
-            aux_indices,
-            aux_logits,
+            torch.empty(score_rows, triton.cdiv(width, 4) * 4, dtype=torch.float32, device=device)[
+                :, :width
+            ],
         )
 
     def _cache_layout(self, md) -> _Layout:
@@ -255,7 +279,11 @@ class IndexState:
         positions = (kv - seq)[requests] + rows - starts[requests]
         width = int(md.kv_lens_runtime[: md.num_seqs].max()) if n_rows else 0
         passes = []
-        if width > self.topk:
+        # A pure decode graph uses token-sparse attention whenever its maximum
+        # sequence length can exceed top-k. In deterministic mode the same row
+        # must use that arithmetic when it shares a step with a short prefill.
+        if width > self.topk or (self.batch_invariant and self._buffers is not None):
+            width = max(width, self.topk)
             passes = self._prefill_passes(md.seq_lens[: md.num_seqs].tolist(), width, seq.device)
         return IndexPlan(
             layout,
@@ -265,6 +293,9 @@ class IndexState:
             md.num_ctx_tokens,
             self.topk,
             passes,
+            verify_width=generation_width(
+                n_rows - md.num_ctx_tokens, md.num_seqs - md.num_contexts
+            ),
         )
 
     def plan(self, md, n_rows: int) -> IndexPlan:
@@ -307,7 +338,6 @@ class IndexState:
                         splits,
                         width,
                         _DECODE_ROWS,
-                        width >= _SPLIT_TOPK_MIN_WIDTH and size < self.num_sms,
                     )
                 )
         return IndexPlan(
@@ -319,4 +349,5 @@ class IndexState:
             self.topk,
             passes,
             buffers,
+            verify_width=width_per_request,
         )
