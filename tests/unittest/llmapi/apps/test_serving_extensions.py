@@ -19,7 +19,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from tensorrt_llm.checkpoint_format import NEMOTRON_SHORTCUT_MODEL_TYPE
 from tensorrt_llm.serve import serving_extensions
 from tensorrt_llm.serve.serving_extensions import (
     ServingExtension,
@@ -38,7 +37,7 @@ pytestmark = pytest.mark.cpu_only
         ("kimi_k3", "template"),
         ("nemotron_h_omni", "grammar"),
         ("nemotron_h", "grammar"),
-        (NEMOTRON_SHORTCUT_MODEL_TYPE, "grammar"),
+        ("nemotron4", "grammar"),
         ("qwen3", None),
         ("qwen3_next", None),
         ("unknown", None),

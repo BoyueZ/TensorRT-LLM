@@ -14,7 +14,6 @@
 # limitations under the License.
 """Guided output for Nemotron chat templates with a prefilled thinking marker."""
 
-from tensorrt_llm.checkpoint_format import NEMOTRON_SHORTCUT_MODEL_TYPE
 from tensorrt_llm.serve.serving_extensions import (
     RequiredToolChoiceMode,
     ServingExtension,
@@ -23,7 +22,7 @@ from tensorrt_llm.serve.serving_extensions import (
 
 
 @register_serving_extension(
-    model_types=("nemotron_h", "nemotron_h_omni", NEMOTRON_SHORTCUT_MODEL_TYPE),
+    model_types=("nemotron_h", "nemotron_h_omni", "nemotron4"),
     reasoning_parsers=("nemotron-v3", "nano-v3"),
 )
 class NemotronServingExtension(ServingExtension):

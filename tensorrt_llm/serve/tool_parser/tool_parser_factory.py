@@ -5,8 +5,6 @@ import json
 from pathlib import Path
 from typing import Optional, Type
 
-from tensorrt_llm.checkpoint_format import NEMOTRON_SHORTCUT_MODEL_TYPE
-
 from .base_tool_parser import BaseToolParser
 from .deepseekv3_parser import DeepSeekV3Parser
 from .deepseekv4_parser import DeepSeekV4Parser
@@ -51,7 +49,7 @@ MODEL_TYPE_TO_TOOL_PARSER: dict[str, str] = {
     "muse_spark": "musespark",
     # Both Nemotron chat templates emit the Qwen3-Coder XML tool-call format.
     "nemotron_h_omni": "qwen3_coder",
-    NEMOTRON_SHORTCUT_MODEL_TYPE: "qwen3_coder",
+    "nemotron4": "qwen3_coder",
 }
 
 

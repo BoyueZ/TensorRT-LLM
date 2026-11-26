@@ -3,8 +3,6 @@
 
 from strenum import StrEnum
 
-NEMOTRON_SHORTCUT_MODEL_TYPE = "nemotron4"
-
 
 class CheckpointFormat(StrEnum):
     """Built-in checkpoint loader formats. Custom registrations can use strings."""

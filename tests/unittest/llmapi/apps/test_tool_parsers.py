@@ -23,7 +23,6 @@ from unittest.mock import Mock
 
 import pytest
 
-from tensorrt_llm.checkpoint_format import NEMOTRON_SHORTCUT_MODEL_TYPE
 from tensorrt_llm.sampling_params import SamplingParams
 from tensorrt_llm.serve.openai_protocol import (ChatCompletionToolsParam,
                                                 FunctionDefinition)
@@ -4780,8 +4779,7 @@ class TestPoolsideV1ToolParserFactory:
 class TestNemotronToolParserFactory:
     """Resolve the Qwen3-Coder XML format from the checkpoint model_type."""
 
-    @pytest.mark.parametrize("model_type",
-                             ["nemotron_h_omni", NEMOTRON_SHORTCUT_MODEL_TYPE])
+    @pytest.mark.parametrize("model_type", ["nemotron_h_omni", "nemotron4"])
     def test_auto_detect(self, tmp_path, model_type):
         from tensorrt_llm.serve.tool_parser.tool_parser_factory import \
             resolve_auto_tool_parser
