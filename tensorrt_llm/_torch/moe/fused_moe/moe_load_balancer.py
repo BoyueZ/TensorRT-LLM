@@ -100,22 +100,6 @@ class HostMoeTensorSharer:
         self.names = []
 
         self.loaded_shared_weights = []
-        self.checkpoint_banks = None
-
-    def register_checkpoint_banks(self, banks, slot_parameter):
-        """Register CPU weight planes indexed by logical expert ID.
-
-        Exports may store a fused bank or separate tensors per expert. Preserve
-        each rank's checkpoint views and their row pitches until native shutdown.
-        """
-        for name, bank in banks.items():
-            slots = slot_parameter(name)
-            if len(bank) != self.expert_count or any(
-                    t.device.type != "cpu" or t.dtype != slots.dtype
-                    or t.shape != slots.shape[1:] or t.ndim > 2 or
-                (t.ndim and t.stride(-1) != 1) for t in bank):
-                raise ValueError(f"Invalid CPU checkpoint expert bank {name}")
-        self.checkpoint_banks = banks
 
     def set_shared_memory_base_name(self, shared_memory_base_name):
         """
@@ -269,13 +253,6 @@ class HostMoeTensorSharer:
         """
         Finalize the host tensor sharing.
         """
-        if self.checkpoint_banks is not None:
-            if add_host_weight_fn is not None:
-                for name, bank in self.checkpoint_banks.items():
-                    for expert, weight in enumerate(bank):
-                        add_host_weight_fn(expert, name, weight)
-            return
-
         for rank in range(self.local_size):
             if rank == self.local_rank:
                 continue
@@ -318,7 +295,6 @@ class HostMoeTensorSharer:
         Call after the C++ load balancer has shut down, so no weight update
         still reads them, and before the barrier that lets the owner unlink them.
         """
-        self.checkpoint_banks = None
         for shm in self.imported_shms:
             shm.close()
             resource_tracker.unregister(shm._name, "shared_memory")
@@ -372,6 +348,7 @@ class SingleLayerMoeLoadBalancer:
         self.host_tensor_sharer = HostMoeTensorSharer(
             layer_id, expert_count,
             shared_mpi_comm) if self.updates_enabled else None
+        self._local_host_weights = {}
         self.register_weight_fns = []
         self.to_migrate_weight_fns = []
 
@@ -504,6 +481,17 @@ class SingleLayerMoeLoadBalancer:
         host_weight = _tensor_to_weight(t)
         self._add_host_weight(expert_id, name, host_weight)
 
+    def register_local_host_weights(self, name: str,
+                                    bank: torch.Tensor | List[torch.Tensor],
+                                    slots: torch.Tensor) -> None:
+        """Keep this rank's TP shard of every expert until native updates stop."""
+        expected = ("cpu", slots.dtype, slots.shape[1:])
+        if len(bank) != self.expert_count or any(
+            (w.device.type, w.dtype, w.shape) != expected or w.ndim > 2 or
+            (w.ndim and w.stride(-1) != 1) for w in bank):
+            raise ValueError(f"Invalid CPU expert weights for {name}")
+        self._local_host_weights[name] = bank
+
     def set_initial_weight_assignments(self,
                                        initial_weight_assignments: List[int]):
         """
@@ -554,7 +542,11 @@ class SingleLayerMoeLoadBalancer:
         Finalize the model after all layers have been added.
         This must be called before starting any iterations.
         """
-        if self.updates_enabled:
+        if self._local_host_weights:
+            for name, bank in self._local_host_weights.items():
+                for expert_id, weight in enumerate(bank):
+                    self._add_host_weight_from_tensor(expert_id, name, weight)
+        elif self.updates_enabled:
             self.host_tensor_sharer.finalize_host_tensor_sharing(
                 self._add_host_weight_from_tensor)
 
@@ -793,6 +785,7 @@ class SingleLayerMoeLoadBalancer:
 
         Call after the C++ shutdown and before the barrier.
         """
+        self._local_host_weights.clear()
         if self.updates_enabled:
             self.host_tensor_sharer.pre_shutdown_cleanup()
 
@@ -964,8 +957,7 @@ class MoeLoadBalancer(BaseMoeLoadBalancer):
 
         self.next_layer_repeated_count = None
 
-    # Without per-layer dynamic EPLB, executor teardown is rank-local and this
-    # balancer is released by its own finalizer, which unlinks its shared memory.
+    # Static placement can release its resources from the rank-local finalizer.
     shutdown_on_finalize = True
 
     def __del__(self):
@@ -1171,6 +1163,7 @@ def maybe_create_moe_load_balancer(
     ep_size = model_config.mapping.moe_ep_size
     model_arch = model_config.pretrained_config.architectures[0]
     using_ep = mapping and mapping.moe_ep_size > 1
+    # Shortcut's media wrapper and text decoder use the same expert placement.
     in_supported_model_arch = model_arch in moe_model_arch_list or is_nemotron_shortcut(
         model_config.pretrained_config)
     using_smart_router = mapping and mapping.moe_cluster_size > 1

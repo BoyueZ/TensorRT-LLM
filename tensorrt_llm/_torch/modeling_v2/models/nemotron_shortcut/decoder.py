@@ -16,12 +16,12 @@ from tensorrt_llm._torch.modeling_v2.catalog.comm.reducescatter import reducesca
 from tensorrt_llm._torch.modeling_v2.catalog.gemm.cublas_mm import cublas_mm
 from tensorrt_llm._torch.models.modeling_utils import DecoderModel, DecoderModelForCausalLM
 from tensorrt_llm._torch.peft.lora.layer import LoraLayer, LoraModuleType
-from tensorrt_llm._torch.peft.lora.ownership import DecoderLoraOwner
 from tensorrt_llm.functional import AllReduceFusionOp, AllReduceStrategy
 
 from .attention_metadata import attention_step_args
 from .gdp import gdp_mixer
 from .indexer import IndexState
+from .lora import ShortcutLoraOwner
 from .moe import clamped_relu2, grouped_experts, routing_weights
 
 _CALL_CONSTANTS = dict(
@@ -653,17 +653,6 @@ class ShortcutDecoder(DecoderModel):
 
 class ShortcutForCausalLM(DecoderModelForCausalLM):
     resets_recurrent_state_in_context = True
-    lora_owner = DecoderLoraOwner(
-        module_path="model",
-        hf_targets=(
-            ("attn_q", "self_attn.q_proj"),
-            ("attn_k", "self_attn.k_proj"),
-            ("attn_v", "self_attn.v_proj"),
-            ("attn_dense", "self_attn.o_proj"),
-            ("mlp_h_to_4h", "mlp.up_proj"),
-            ("mlp_4h_to_h", "mlp.down_proj"),
-        ),
-    )
 
     @classmethod
     def get_preferred_kv_cache_manager_version(cls, pretrained_config=None):
@@ -676,6 +665,11 @@ class ShortcutForCausalLM(DecoderModelForCausalLM):
             config=model_config,
             hidden_size=cfg.hidden_size,
             vocab_size=cfg.vocab_size,
+        )
+        self.lora_owner = ShortcutLoraOwner(
+            module_path="model",
+            head_size=self.model.head_dim,
+            attention_tp=self.model.tp_size,
         )
         self.draft_model = None
         self.spec_worker = None

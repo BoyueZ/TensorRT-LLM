@@ -2315,9 +2315,8 @@ class ModelConfig(Generic[TConfig]):
                                     attn_tp_size * attn_cp_size)
             model_config_cpp.set_num_kv_heads(num_kv_heads)
 
-        # For hybrid models (e.g., Nemotron-H with Mamba + Attention), LoRA can be applied
-        # to non-attention layers (e.g., Mamba in_proj/out_proj). Set num_lora_layers to
-        # total layers so the C++ LoRA validation accepts all layer indices.
+        # PEFT indexes these hybrid adapters by decoder layer, including Mamba or dense MLP
+        # projections. Its C++ cache would otherwise count only attention layers.
         if is_nemotron_hybrid(self.pretrained_config) or is_nemotron_shortcut(
                 self.pretrained_config):
             model_config_cpp.set_num_lora_layers(num_layers)

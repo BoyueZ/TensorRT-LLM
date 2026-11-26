@@ -37,7 +37,7 @@ which is driven from the wrapper and stays on ``MoE``.
 """
 
 import inspect
-from typing import List, Mapping, Optional, Union
+from typing import Dict, List, Optional, Union
 
 import torch
 
@@ -340,15 +340,13 @@ class MoEEplbWeightLayoutMixin:
             return self.layer_load_balancer.is_dynamic_routing()
         return False
 
-    def _slot_parameter(self, weight_name: str):
-        return getattr(self, weight_name)
-
     def register_parameter_weight_slot_fn(self, weight_name: str, local_slot_id: int):
         """Register parameter weight slot function for load balancer."""
         if not self._using_dynamic_load_balancer():
             return
 
-        weight_tensor = self._slot_parameter(weight_name).data[local_slot_id]
+        assert hasattr(self, weight_name), f"MoE doesn't have weight attr: {weight_name}"
+        weight_tensor = getattr(self, weight_name).data[local_slot_id]
         self.layer_load_balancer.register_weight_slot(local_slot_id, weight_name, weight_tensor)
 
     def register_to_fix_weight_fn(self, weight_name: str):
@@ -356,7 +354,8 @@ class MoEEplbWeightLayoutMixin:
         if not self._using_dynamic_load_balancer():
             return
 
-        param = self._slot_parameter(weight_name)
+        assert hasattr(self, weight_name), f"MoE doesn't have weight attr: {weight_name}"
+        param = getattr(self, weight_name)
         weight_tensor = param.detach()
         assert isinstance(weight_tensor, torch.Tensor), f"weight {weight_name} should be a tensor"
         assert weight_tensor.is_contiguous(), (
@@ -376,10 +375,7 @@ class MoEEplbWeightLayoutMixin:
         param.data = weight_tensor
 
     def register_all_parameter_slot_and_to_fix_weight_fns(
-        self,
-        weight_and_tensor_dict: Mapping[str, torch.Tensor | list[torch.Tensor]],
-        *,
-        checkpoint_banks: bool = False,
+        self, weight_and_tensor_dict: Dict[str, torch.Tensor]
     ):
         """Register all parameter slot and weight fixing functions for load balancer."""
         if not self._using_dynamic_load_balancer():
@@ -397,12 +393,6 @@ class MoEEplbWeightLayoutMixin:
             self.layer_load_balancer.add_to_migrate_weight_fn(
                 self.register_to_fix_weight_fn, (weight_name,)
             )
-
-        if checkpoint_banks:
-            self.layer_load_balancer.host_tensor_sharer.register_checkpoint_banks(
-                weight_and_tensor_dict, self._slot_parameter
-            )
-            return
 
         # Setup host tensor sharing
         local_shared_load_expert_ids = self.layer_load_balancer.get_load_expert_ids()

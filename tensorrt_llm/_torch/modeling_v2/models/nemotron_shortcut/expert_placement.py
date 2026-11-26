@@ -2,13 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Bind Shortcut's expert banks to the executor's standard expert load balancer."""
 
-from tensorrt_llm._torch.moe.fused_moe.impl_blocks import MoEEplbWeightLayoutMixin
 from tensorrt_llm._torch.moe.fused_moe.moe_load_balancer import get_moe_load_balancer
 
 
-class ExpertPlacement(MoEEplbWeightLayoutMixin):
+class ExpertPlacement:
     def __init__(self, config, manager, layer_idx, num_experts, topk):
-        self.num_experts = num_experts
         placement = config.get_layer_initial_global_assignments(layer_idx)
         if placement is None:
             resident = num_experts // config.ep_size
@@ -26,15 +24,23 @@ class ExpertPlacement(MoEEplbWeightLayoutMixin):
         self.layer_load_balancer.set_initial_weight_assignments(placement)
 
     def bind_weights(self, parameters, prefix, weights_for_host):
-        # Resolve the current parameters when the loader registers their CUDA slots.
-        self._parameters = parameters
-        self._prefix = prefix
-        self.register_all_parameter_slot_and_to_fix_weight_fns(
-            weights_for_host, checkpoint_banks=True
-        )
+        layer = self.layer_load_balancer
+        for name, bank in weights_for_host.items():
+            key = f"{prefix}experts_{name}"
+            layer.register_local_host_weights(name, bank, parameters[key])
+            layer.add_to_migrate_weight_fn(self._bind_device_slots, (name, parameters, key))
 
-    def _slot_parameter(self, name):
-        return self._parameters[self._prefix + "experts_" + name]
+    def _bind_device_slots(self, name, parameters, key):
+        # The loader can replace a parameter when it moves the model to CUDA.
+        parameter = parameters[key]
+        slots = parameter.detach()
+        if not slots.is_contiguous() or slots.nbytes != slots.untyped_storage().nbytes():
+            raise ValueError(f"Expert slots must own contiguous storage: {key}")
+        layer = self.layer_load_balancer
+        layer.make_tensor_host_accessible(slots)
+        parameter.data = slots
+        for slot_id, weight in enumerate(slots.unbind()):
+            layer.register_weight_slot(slot_id, name, weight)
 
     def route(self, ids):
         layer = self.layer_load_balancer

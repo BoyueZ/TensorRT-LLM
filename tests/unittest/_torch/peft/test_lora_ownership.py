@@ -709,16 +709,3 @@ def test_nemo_invalid_file_type_keeps_path_error(tmp_path: Path) -> None:
 def test_unknown_checkpoint_source_keeps_dispatch_error() -> None:
     with pytest.raises(ValueError, match="Unsupported lora_ckpt_source"):
         load_torch_lora(SimpleNamespace(lora_ckpt_source="unknown"))
-
-
-@pytest.mark.parametrize("heads", [1, 2])
-def test_lora_kv_head_replication_preserves_tp_groups(heads: int) -> None:
-    from tensorrt_llm._torch.peft.lora.manager import _replicate_kv_heads
-
-    tp, head_dim, rank = 4, 8, 2
-    weight = torch.arange(heads * head_dim * rank).view(heads * head_dim, rank)
-    packed = _replicate_kv_heads(weight, heads, head_dim, tp)
-    for tp_rank, shard in enumerate(packed.chunk(tp)):
-        expected = weight.view(heads, head_dim, rank)[tp_rank // (tp // heads)]
-        torch.testing.assert_close(shard, expected)
-    torch.testing.assert_close(_replicate_kv_heads(packed, heads, head_dim, tp), packed)

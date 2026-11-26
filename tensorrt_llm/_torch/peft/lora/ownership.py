@@ -15,10 +15,11 @@
 
 from dataclasses import dataclass
 from inspect import getattr_static
+from typing import ClassVar
 
-from torch import nn
+from torch import Tensor, nn
 
-from .config import LoraConfig, get_default_trtllm_modules_to_hf_modules
+from .config import LoraConfig
 
 
 @dataclass(frozen=True)
@@ -52,25 +53,15 @@ class DecoderLoraOwner:
         "decoder.layers",
     )
 
-    # Optional exact HF projection paths for decoders with heterogeneous blocks.
-    hf_targets: tuple[tuple[str, str], ...] = ()
+    # Some decoders have distinct projections with the same HF leaf name.
+    strict_hf_targets: ClassVar[bool] = False
 
     def configure_hf_targets(self, config: LoraConfig) -> None:
-        if not self.hf_targets:
-            return
-        if config.lora_ckpt_source != "hf":
-            raise ValueError("This decoder requires HF LoRA checkpoints with separate projections")
-        supported = dict(self.hf_targets)
-        if any(supported.get(k) != v for k, v in config.trtllm_modules_to_hf_modules.items()):
-            raise ValueError(f"Expected decoder LoRA projection mapping {supported}")
-        config.trtllm_modules_to_hf_modules = supported
-        requested = set(config.lora_target_modules)
-        if requested == set(get_default_trtllm_modules_to_hf_modules()):
-            # LlmArgs expands an unspecified target list to every known module.
-            config.lora_target_modules = list(supported)
-        elif unsupported := requested - supported.keys():
-            raise ValueError(f"Unsupported decoder LoRA targets {sorted(unsupported)}")
-        config.lora_target_modules.extend(config.missing_qkv_modules)
+        """Apply decoder-specific target mappings before the PEFT cache loads adapters."""
+
+    def prepare_hf_weight(self, projection: str, direction: str, weight: Tensor) -> Tensor:
+        """Return the HF adapter weight in the layout expected by this decoder's PEFT cache."""
+        return weight
 
     def __post_init__(self) -> None:
         if not isinstance(self.module_path, str) or (
