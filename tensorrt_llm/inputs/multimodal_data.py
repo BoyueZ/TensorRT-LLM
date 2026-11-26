@@ -19,6 +19,8 @@ MEDIA_MODALITIES: tuple[MediaModality, ...] = get_args(MediaModality)
 # how frames were sampled and therefore change the model-visible content.
 _VIDEO_HASH_METADATA_FIELDS = (
     "frames_indices",
+    "sampled_frame_indices",
+    "sampled_timestamps",
     "fps",
     "duration",
     "total_num_frames",
