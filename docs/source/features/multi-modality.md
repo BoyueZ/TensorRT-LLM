@@ -104,6 +104,7 @@ Please refer to the latest multimodal [support matrix](../models/supported-model
 BF16, MXFP8 and NVFP4 checkpoints with the single-frame video processor
 support image chat with the shipped template and raw image captioning. For a raw caption, place `A photo of` on the line immediately
 after the `<nemo:img>` placeholder.
+The processor uses [OpenCV](#optional-dependencies) to resize images and video frames.
 
 For video, use the checkpoint's chat template with a video content item.
 The processor samples frames and adds their timestamps to the prompt.
@@ -117,11 +118,13 @@ for processor metadata, payload selection, model hooks, and encoder/prefill hand
 
 ## Optional dependencies
 
-Video decoding and Nemotron Shortcut image preprocessing use OpenCV (`cv2`). Install the headless package with the following command.
+Video input decoding uses OpenCV (`cv2`) and is not installed by default. Install it for models with video inputs:
 
 ```bash
 pip install opencv-python-headless
 ```
+
+Text-only workflows do not require this package.
 
 ## Examples
 
