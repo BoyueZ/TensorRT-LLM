@@ -69,10 +69,9 @@ class IndexPoolRows(OpWrapper):
     )
 
     note = """
-    This is the conversion ``test_sparse_mqa_gqa`` makes with the DSA helper
-    (`triton_convert_req_index_to_global_index`) from a host block table, read
-    instead from the device block offsets the step already holds. The rows fit
-    int32 for pools below 2^31 rows (1 TiB at 512-byte rows).
+    The conversion reads the device block offsets the step already holds, so it
+    needs no host block table. The rows fit int32 for pools below 2^31 rows
+    (1 TiB at 512-byte rows).
     """
 
     def __call__(

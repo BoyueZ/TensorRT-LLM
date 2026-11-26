@@ -123,6 +123,8 @@ class ShortcutDecoder(DecoderModel):
         self.dp_size = mapping.tp_size if self.attn_dp else 1
         self.tp_group = list(mapping.tp_group)
         self.deterministic_allreduce = force_all_reduce_deterministic()
+        # A request's output is independent of the requests batched with it only under
+        # FORCE_DETERMINISTIC=1. The fixed launch shapes this takes cost throughput.
         self.batch_invariant = os.getenv("FORCE_DETERMINISTIC", "0") == "1"
         self.allreduce_args = (
             allreduce_group_args(mapping, strategy=int(AllReduceStrategy.NCCL))

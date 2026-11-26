@@ -30,8 +30,6 @@ class ShortcutLoraOwner(DecoderLoraOwner):
     attention_tp: int
 
     def configure_hf_targets(self, config: LoraConfig) -> None:
-        if config.lora_ckpt_source != "hf":
-            raise ValueError("This decoder requires HF LoRA checkpoints with separate projections")
         if any(HF_PROJECTIONS.get(k) != v for k, v in config.trtllm_modules_to_hf_modules.items()):
             raise ValueError(f"Expected decoder LoRA projection mapping {HF_PROJECTIONS}")
         requested = set(config.lora_target_modules)

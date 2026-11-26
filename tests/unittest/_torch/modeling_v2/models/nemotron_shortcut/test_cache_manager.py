@@ -8,7 +8,6 @@ from tensorrt_llm._torch.configs.nemotron_shortcut import NemotronShortcutTextCo
 from tensorrt_llm._torch.disaggregation.resource.kv_extractor import build_page_table_from_manager
 from tensorrt_llm._torch.disaggregation.resource.page import MapperKind
 from tensorrt_llm._torch.model_config import ModelConfig
-from tensorrt_llm._torch.modules.mamba.cache_manager import ReplayHistory
 from tensorrt_llm._torch.modules.nemotron_shortcut.cache_manager import NemotronShortcutCacheManager
 from tensorrt_llm._torch.pyexecutor._util import _create_kv_cache_manager, get_kv_cache_manager_cls
 from tensorrt_llm._torch.pyexecutor.config_utils import extract_mamba_kv_cache_params
@@ -235,15 +234,3 @@ def test_disagg_rejects_cpp_transport():
     transceiver = CacheTransceiverConfig(backend="NIXL", transceiver_runtime="CPP")
     with pytest.raises(ValueError, match="transceiver_runtime='PYTHON'"):
         get_kv_cache_manager_cls(model, cache, is_disagg=True, cache_transceiver_config=transceiver)
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA-backed cache manager")
-def test_disagg_rejects_compact_replay():
-    class CompactManager(NemotronShortcutCacheManager):
-        def _initialize_spec_state(self):
-            return ReplayHistory(self.spec_config.tokens_per_gen_step)
-
-    model = ModelConfig(pretrained_config=_config(), mapping=Mapping())
-    cache = KvCacheConfig(max_tokens=128, use_kv_cache_manager_v2=True)
-    with pytest.raises(ValueError, match="Disaggregated GDP requires full snapshots"):
-        _disagg_manager(model, cache, CompactManager, MTPDecodingConfig(max_draft_len=2))

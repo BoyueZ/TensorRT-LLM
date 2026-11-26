@@ -128,7 +128,7 @@ def projection_parts(name, shape, entries, recipe, is_excluded=None):
 
 
 def _copy_scalar(weights, key, target):
-    # The actual export stores zero-dimensional scales. A lazy safetensors
+    # The checkpoint stores zero-dimensional scales. A lazy safetensors
     # slice accepts an empty index tuple for a scalar, whereas [:] is invalid.
     copy_checked(target.reshape(()), weights[key][()], key)
 

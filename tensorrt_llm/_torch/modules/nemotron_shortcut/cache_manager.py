@@ -48,19 +48,6 @@ class NemotronShortcutCacheManager(MambaHybridCacheManagerV2):
 
     _supports_mixed_precision_kv = False
 
-    def _initialize_spec_state(self):
-        # GDP records a complete convolution window and recurrent state per
-        # candidate. The executor promotes the accepted pair for each request.
-        return Mamba2State() if self.spec_config is not None else None
-
-    def _configure_attention_cache_layout(self, kv_cache_config, kv_cache_type, **kwargs):
-        # The NIXL handoff transfers the live GDP state and convolution window.
-        # A compact verification history would require additional transfer buffers.
-        state = self._speculative_state
-        if kwargs.get("is_disagg") and state is not None and type(state) is not Mamba2State:
-            raise ValueError("Disaggregated GDP requires full snapshots for MTP verification.")
-        return super()._configure_attention_cache_layout(kv_cache_config, kv_cache_type, **kwargs)
-
     def __init__(self, *args, pretrained_config, dtype, **kwargs):
         config = getattr(pretrained_config, "text_config", None) or pretrained_config
         if dtype not in (DataType.BF16, DataType.NVFP4):
@@ -73,6 +60,11 @@ class NemotronShortcutCacheManager(MambaHybridCacheManagerV2):
             conv_section_widths=config.gdp_conv_section_widths,
             **kwargs,
         )
+
+    def _initialize_spec_state(self):
+        # GDP records a complete convolution window and recurrent state per
+        # candidate. The executor promotes the accepted pair for each request.
+        return Mamba2State() if self.spec_config is not None else None
 
     @classmethod
     def _estimate_attention_cache_cost(cls, model_config, mapping, **kwargs):
