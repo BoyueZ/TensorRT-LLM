@@ -209,6 +209,13 @@ Check in `route` every requirement the target has, not only in the target's
 constructor. A configuration that `route` declines falls back to Modeling V1
 under `auto`; one that the constructor rejects with an assertion fails.
 
+A family whose checkpoint has no Modeling V1 model also declares its input
+processor in `routing.py`, in a function decorated with
+`@input_processors(...)` for the same architecture names. It receives the
+checkpoint config and `disable_mm_encoder`, and returns the config and the
+input processor class to build, or `None` for the default input processor.
+[Nemotron Shortcut routing](models/nemotron_shortcut/routing.py) is an example.
+
 `route` reads no MoE tactic (`moe_config.tactic`, `speculative_config.moe_tactic`),
 so a target with MoE layers declares the MoE implementation ids it runs.
 `moe_impls_honored` lists the ids a `moe_config.tactic` may resolve to for the

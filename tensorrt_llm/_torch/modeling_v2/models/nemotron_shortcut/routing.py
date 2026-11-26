@@ -7,7 +7,7 @@ import torch
 from tensorrt_llm._torch.configs.nemotron_shortcut import NemotronShortcutTextConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
 
-from ..._router_index import NoTarget, engine_kv_cache_quant_algo, routes
+from ..._router_index import NoTarget, engine_kv_cache_quant_algo, input_processors, routes
 
 # (world size, attention DP, MoE TP, MoE EP), all on a single SM103 node.
 _FOUR_RANK_LAYOUTS = {
@@ -165,3 +165,18 @@ def route(model_config, llm_args, compute_capability):
 
         return ShortcutNvfp4ForCausalLM
     raise NoTarget(f"Unsupported checkpoint precision: {quant}.")
+
+
+@input_processors(NemotronShortcutTextConfig.causal_lm_architecture)
+def input_processor(config, *, disable_mm_encoder):
+    if disable_mm_encoder:
+        from .input_processor import ShortcutTextInputProcessor
+
+        return config, ShortcutTextInputProcessor
+    media_config = config.get_media_config()
+    if media_config is None:
+        return config, None
+    # Importing the module registers the image and video placeholders.
+    from .multimodal import ShortcutInputProcessor
+
+    return media_config, ShortcutInputProcessor

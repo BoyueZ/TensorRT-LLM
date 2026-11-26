@@ -1300,11 +1300,10 @@ def create_input_processor(
         except (RuntimeError, ConfigInputError,
                 UnsupportedError):  # unregistered model
             model_cls = None
-            input_processor_cls = None
-            resolve = getattr(type(config), "resolve_input_processor", None)
-            if resolve is not None:
-                config, input_processor_cls = resolve(
-                    config, disable_mm_encoder=disable_mm_encoder)
+            from tensorrt_llm._torch.modeling_v2 import \
+                modeling_v2_input_processor
+            config, input_processor_cls = modeling_v2_input_processor(
+                config, disable_mm_encoder=disable_mm_encoder)
             if input_processor_cls is None:
                 logger.info("Unregistered model, using DefaultInputProcessor")
         if input_processor_cls is not None:
