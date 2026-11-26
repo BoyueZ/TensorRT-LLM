@@ -969,13 +969,14 @@ def resolve_target_identity(
             ),
             derive_family(architecture),
         )
-    package = override.get("package")
-    if not package:
-        segment = override.get("checkpoint_segment") or derive_checkpoint_segment(
-            task_data["checkpoint_path"]
-        )
-        package = f"{segment}__{task_data['arch']}__{task_data['parallel']}"
-    target_rel = f"{MODELING_V2_PACKAGE}/models/{family}/{package}"
+    segment = override.get("checkpoint_segment") or derive_checkpoint_segment(
+        task_data["checkpoint_path"]
+    )
+
+    target_rel = (
+        f"{MODELING_V2_PACKAGE}/models/{family}/"
+        f"{segment}__{task_data['arch']}__{task_data['parallel']}"
+    )
     return family, target_rel
 
 

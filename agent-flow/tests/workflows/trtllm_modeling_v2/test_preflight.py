@@ -108,19 +108,6 @@ def test_a_routed_architecture_takes_the_directory_of_the_family_that_routes_it(
     assert fresh == "foo_bar"
 
 
-def test_unified_members_can_share_an_explicit_target_package(tmp_path):
-    task = _task(
-        tmp_path,
-        parallel="unified",
-        members=["tp4", "dep4"],
-        target={"family": "example", "package": "bf16__sm_10x__default"},
-    )
-    assert preflight.resolve_target_identity(task, {}) == (
-        "example",
-        f"{MODELING_V2_PACKAGE}/models/example/bf16__sm_10x__default",
-    )
-
-
 def test_a_relative_variant_needs_its_units_benchmark_and_disagg_one_node(tmp_path):
     fp8 = {"llm_api_options": {"kv_cache_config": {"dtype": "fp8"}}, "members": ["dep4"]}
     task = _task(

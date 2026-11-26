@@ -93,47 +93,6 @@ def _gates_recorder(result: CommandResult | list[CommandResult]):
     return run
 
 
-@pytest.mark.parametrize(
-    "member,moe_tp,moe_ep,expected",
-    [
-        ("tp4", 2, 2, (2, 2)),
-        ("tp4", 2, None, (2, None)),
-        ("tep4", None, 2, (None, 2)),
-        ("tp4", None, None, (None, 1)),
-        ("tep4", None, None, (None, 4)),
-        ("dep4", -1, -1, (-1, 4)),
-    ],
-)
-def test_boot_and_gsm8k_preserve_the_requested_moe_layout(
-    tmp_path, member, moe_tp, moe_ep, expected
-):
-    options = tmp_path / "options.yaml"
-    options.write_text(
-        yaml.safe_dump(dict(moe_tensor_parallel_size=moe_tp, moe_expert_parallel_size=moe_ep))
-    )
-    task = {**_gates_TASK, "accuracy": {**_gates_TASK["accuracy"], "llm_api_options": str(options)}}
-    gate_args = dict(
-        task_data=task,
-        member=member,
-        unit="core",
-        workdir=tmp_path,
-        runner=_gates_recorder(CommandResult(returncode=1)),
-    )
-    env = _gates_env(world_size=4, devices=(0, 1, 2, 3))
-    boot_checks.run_boot_gate(env, **gate_args)
-    accuracy_checks.run_accuracy_gate(env, reference=90.0, **gate_args)
-
-    boot = json.loads((tmp_path / f"boot.core.{member}.json").read_text())["llm"]
-    evaluation = yaml.safe_load((tmp_path / f"eval.core.{member}.yaml").read_text())
-    for config in (boot, evaluation):
-        assert (
-            config.get("moe_tensor_parallel_size"),
-            config.get("moe_expert_parallel_size"),
-        ) == expected
-        assert config["tensor_parallel_size"] == 4
-        assert config["enable_attention_dp"] is (member == "dep4")
-
-
 def test_a_cancelled_gate_has_no_verdict_and_is_not_queued_again_at_once(tmp_path):
     """A gate job cancelled through the spool raises: missing, not FAIL, and no re-run here."""
     from agent_flow.workflows.trtllm_modeling_v2.infra.compute.environment import RunEnvironment

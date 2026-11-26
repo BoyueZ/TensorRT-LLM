@@ -209,9 +209,9 @@ def profile_of(task_data: Mapping[str, Any], unit: str | None = None) -> str:
     return str(profile or PROFILE_STANDARD)
 
 
-TARGET_KEYS: tuple[str, ...] = ("family", "checkpoint_segment", "package")
+TARGET_KEYS: tuple[str, ...] = ("family", "checkpoint_segment")
 #: The ``target`` keys that name a Python package directory.
-TARGET_NAME_KEYS: tuple[str, ...] = TARGET_KEYS
+TARGET_NAME_KEYS: tuple[str, ...] = ("family", "checkpoint_segment")
 
 ACCURACY_KEYS: tuple[str, ...] = (
     # The `acceptance_length` floor a unit is held to, and the acceptance
@@ -423,8 +423,6 @@ def _validate_target(block: Any, errors: list[str]) -> None:
     if not isinstance(block, dict):
         raise TaskSchemaError(f"'{TARGET_FIELD}' must be a mapping, got {type(block).__name__}")
     reject_unknown_keys(block, TARGET_KEYS, errors, where=TARGET_FIELD)
-    if block.get("package") and block.get("checkpoint_segment"):
-        errors.append("'target.package' and 'target.checkpoint_segment' are mutually exclusive")
     for name in TARGET_NAME_KEYS:
         value = block.get(name)
         if value is None:
