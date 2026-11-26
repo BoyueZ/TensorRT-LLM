@@ -50,15 +50,23 @@ class NemotronShortcutTextConfig(PretrainedConfig):
             return None
         return NemotronShortcutConfig(text_config=self, dtype=self.dtype, **self.media_config)
 
-    def get_input_processor_model(self):
+    def resolve_input_processor(self, *, disable_mm_encoder: bool):
+        if disable_mm_encoder:
+            from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.input_processor import (
+                ShortcutTextInputProcessor,
+            )
+
+            return self, ShortcutTextInputProcessor
+
         config = self.get_media_config()
         if config is None:
-            return None
+            return self, None
+        # Import the module that registers the image and video placeholders.
         from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.multimodal import (
-            ShortcutMedia,
+            ShortcutInputProcessor,
         )
 
-        return config, ShortcutMedia
+        return config, ShortcutInputProcessor
 
     layer_types: list[str] | None = None
     block_types: list[str] | None = None

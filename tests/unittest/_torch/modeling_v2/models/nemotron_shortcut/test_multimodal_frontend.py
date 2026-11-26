@@ -127,8 +127,10 @@ def test_chat_placeholder_and_disabled_encoder(processor: ShortcutInputProcessor
     model_type = resolve_top_level_model_type(chat_config)
     assert retrieve_multimodal_placeholder(model_type, "image", 1) == "<nemo:img>"
 
+    (path / "processor_config.json").unlink()
     disabled = create_input_processor(str(path), processor.tokenizer, disable_mm_encoder=True)
     process = create_input_processor_with_hash(disabled)
+    assert process({"prompt": "<end>"}, SamplingParams(add_special_tokens=False)) == ([3], None)
     image = Image.new("RGB", (4, 4))
     for prompt in ({"prompt": "<nemo:img>"}, {"prompt_token_ids": [1]}):
         with pytest.raises(ValueError, match="disable_mm_encoder=True"):
