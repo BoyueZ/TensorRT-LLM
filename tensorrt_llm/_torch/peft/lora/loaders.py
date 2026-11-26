@@ -172,6 +172,8 @@ def iterate_hf_lora(
             saved_module = re.search(r"(?:^|\.)(?:lm_head|embed_tokens)(?:\.|$)", key)
             if saved_module is not None:
                 _validate_owner_prefix(key, key[: saved_module.start()], owner, "HF", layered=False)
+                if owner.hf_targets:
+                    raise ValueError(f"Only decoder LoRA projections are supported, found '{key}'")
                 continue
             _validate_unparsed_key_owner(key, owner, "HF")
             raise KeyError(f"unsupported key {key} from HF LoRA weights")
@@ -188,6 +190,10 @@ def iterate_hf_lora(
         else:
             module_name = m.group(4)
             hf_module = m.group(3) + "." + module_name
+        if owner.hf_targets and hf_module not in hf_modules:
+            raise ValueError(
+                f"Unsupported decoder LoRA projection in '{key}'; expected {sorted(hf_modules)}"
+            )
         if hf_module not in hf_modules:
             hf_module = module_name
 

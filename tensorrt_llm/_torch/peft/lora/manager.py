@@ -147,6 +147,21 @@ class LoraModelConfig:
     dtype: str
     swap_gate_up_proj_lora_b_weight: bool = True
     owner: DecoderLoraOwner = DecoderLoraOwner()
+    num_key_value_heads: int | None = None
+
+
+def _replicate_kv_heads(weight: torch.Tensor, heads: int, head_size: int, tp: int) -> torch.Tensor:
+    """Lay out one complete KV head per rank for the PEFT cache's column-parallel split."""
+    if weight.shape[0] == tp * head_size:
+        # Some exported adapters already contain one KV head per TP rank.
+        return weight
+    if tp % heads or weight.shape[0] != heads * head_size:
+        raise ValueError(
+            f"Invalid KV adapter shape {tuple(weight.shape)} for {heads} heads of size {head_size} and TP {tp}"
+        )
+    return (
+        weight.unflatten(0, (heads, head_size)).repeat_interleave(tp // heads, dim=0).flatten(0, 1)
+    )
 
 
 def load_torch_hf_lora(
@@ -798,6 +813,27 @@ class LoraManager(object):
                         t_in = module_weights["in"]
                         t_out = module_weights["out"]
                         t_mag = module_weights.get("magnitude", None)
+
+                    # The PEFT cache TP-splits K/V outputs across all ranks. When
+                    # KV heads are replicated, each group of ranks needs the same B rows.
+                    kv_heads = (
+                        model_config.num_key_value_heads
+                        if isinstance(model_config, LoraModelConfig)
+                        else None
+                    )
+                    tp_size = self._mapping.tp_size
+                    if (
+                        lora_module in ("attn_k", "attn_v")
+                        and isinstance(kv_heads, int)
+                        and 0 < kv_heads < tp_size
+                    ):
+                        t_out = _replicate_kv_heads(
+                            t_out, kv_heads, self._model_config.head_size, tp_size
+                        )
+                        if t_mag is not None:
+                            t_mag = _replicate_kv_heads(
+                                t_mag, kv_heads, self._model_config.head_size, tp_size
+                            )
 
                     is_dora = t_mag is not None
                     rank_dim = 1 if has_expert_indices else 0

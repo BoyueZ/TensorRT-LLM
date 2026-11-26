@@ -11,6 +11,28 @@ from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.moe import routing
 
 
 @pytest.mark.cpu_only
+def test_indexer_adapter_cannot_alias_attention_query():
+    from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.decoder import ShortcutForCausalLM
+    from tensorrt_llm._torch.peft.lora.loaders import get_all_hf_lora_weights
+
+    owner = ShortcutForCausalLM.lora_owner
+    targets = {hf for _, hf in owner.hf_targets}
+    key = "base_model.model.model.language_model.layers.5.self_attn.indexer.q_proj.lora_A.weight"
+    with pytest.raises(ValueError, match="Unsupported decoder LoRA projection"):
+        get_all_hf_lora_weights({key: torch.empty(8, 16)}, targets, owner=owner)
+
+
+@pytest.mark.cpu_only
+def test_fused_nemo_adapter_is_rejected_before_target_inference(tmp_path):
+    from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.decoder import ShortcutForCausalLM
+    from tensorrt_llm._torch.peft.lora.config import LoraConfig
+
+    config = LoraConfig(lora_ckpt_source="nemo", lora_dir=[str(tmp_path)])
+    with pytest.raises(ValueError, match="requires HF LoRA checkpoints with separate projections"):
+        ShortcutForCausalLM.lora_owner.configure_hf_targets(config)
+
+
+@pytest.mark.cpu_only
 def test_logit_correction_only_affects_expert_selection():
     # Correcting sigmoid scores would select expert 1 instead of expert 0.
     logits = torch.tensor([[7.0, 2.0, 3.0, -2.0]])

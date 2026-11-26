@@ -5583,6 +5583,7 @@ def create_py_executor_resources(
     peft_cache_manager = None
     if lora_config is not None:
         lora_owner = model_engine.initialize_lora_owner()
+        lora_owner.configure_hf_targets(lora_config)
         # TODO: Refactor dimension resolution into a LoraModuleDimensions
         # dataclass to avoid ad-hoc getattr + TP-division blocks per model type.
         from tensorrt_llm.bindings import LoraModule

@@ -45,6 +45,8 @@ class Nvfp4Projection:
     inverse_input_scale: torch.Tensor
     alpha: torch.Tensor
     out_features: int
+    # Online placement replaces raw calibration in the same slots as the matrices.
+    live_scales: tuple[torch.Tensor, torch.Tensor] | None = None
 
     def apply(self, x):
         if x.shape[0] == 0:
@@ -57,9 +59,14 @@ class Nvfp4Projection:
         from flashinfer.gemm import grouped_gemm_nt_masked
         from flashinfer.quantization.fp4_quantization import scaled_fp4_grouped_quantize
 
-        lhs = scaled_fp4_grouped_quantize(
-            x, counts, self.inverse_input_scale[start:end], nvfp4_4over6=None
-        )
+        if self.live_scales is None:
+            inverse = self.inverse_input_scale[start:end]
+            alpha = self.alpha[start:end]
+        else:
+            input_scale, weight_scale = self.live_scales
+            inverse = input_scale[start:end].reciprocal()
+            alpha = input_scale[start:end] * weight_scale[start:end]
+        lhs = scaled_fp4_grouped_quantize(x, counts, inverse, nvfp4_4over6=None)
         w = self.weight[start:end]
         experts, padded_n, half_k = w.shape
         # The physical layout of these scales is already the 128x4 GPU swizzle.
@@ -79,7 +86,7 @@ class Nvfp4Projection:
             sf_dtype="float8_e4m3fn",
             c_dtype="bfloat16",
             sf_vec_size=16,
-            alpha=self.alpha[start:end],
+            alpha=alpha,
             alpha_dtype="float32",
         )
         return out[:, :, : self.out_features]

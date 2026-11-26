@@ -14,6 +14,8 @@ from tensorrt_llm._torch.modeling_v2.catalog.comm.allreduce import allreduce, al
 from tensorrt_llm._torch.modeling_v2.catalog.comm.reducescatter import reducescatter
 from tensorrt_llm._torch.modeling_v2.catalog.gemm.cublas_mm import cublas_mm
 from tensorrt_llm._torch.models.modeling_utils import DecoderModel, DecoderModelForCausalLM
+from tensorrt_llm._torch.peft.lora.layer import LoraLayer, LoraModuleType
+from tensorrt_llm._torch.peft.lora.ownership import DecoderLoraOwner
 from tensorrt_llm.functional import AllReduceFusionOp, AllReduceStrategy
 
 from .attention_metadata import attention_step_args
@@ -181,6 +183,13 @@ class ShortcutDecoder(DecoderModel):
         self.expert_inter = cfg.moe_intermediate_size // moe_tp
         self.local_experts = self.num_experts // ep
         self.moe_ep_size, self.moe_ep_rank = ep, mapping.moe_ep_rank
+        self.expert_placements = {}
+        if getattr(model_config, "moe_load_balancer", None) is not None:
+            from .expert_placement import create_placements
+
+            self.expert_placements = create_placements(
+                model_config, self.kinds, (_ATTN_MOE, _GDP_MOE), self.num_experts, self.topk
+            )
 
         attention_layers = [i for i, kind in enumerate(self.kinds) if kind == _ATTN_MOE]
         if self.mtp_enabled:
@@ -237,6 +246,29 @@ class ShortcutDecoder(DecoderModel):
         w["final_norm"] = P(H)
         w["embed"] = P(cfg.vocab_size, H)
 
+        self.adapters = nn.ModuleDict()
+        if model_config.lora_config is not None:
+            for i, kind in enumerate(self.kinds):
+                if kind == _ATTN_MOE:
+                    slots = {
+                        "q": (LoraModuleType.ATTENTION_Q, self.heads_q * self.head_dim),
+                        "k": (LoraModuleType.ATTENTION_K, self.heads_kv * self.head_dim),
+                        "v": (LoraModuleType.ATTENTION_V, self.heads_kv * self.head_dim),
+                        "o": (LoraModuleType.ATTENTION_DENSE, H),
+                    }
+                elif kind == _MLP:
+                    slots = {
+                        "up": (LoraModuleType.MLP_H_TO_4H, self.inter),
+                        "down": (LoraModuleType.MLP_4H_TO_H, H),
+                    }
+                else:
+                    continue
+                group = nn.ModuleDict(
+                    {name: LoraLayer([module], [size]) for name, (module, size) in slots.items()}
+                )
+                group.layer_idx = i
+                self.adapters[str(i)] = group
+
         self.w = w
         self._layers = None
         self._kv_layer = {}
@@ -257,6 +289,8 @@ class ShortcutDecoder(DecoderModel):
 
     def _declare_moe(self, w: nn.ParameterDict, prefix: str, P) -> None:
         """The post-mixer norm, router and latent / shared experts."""
+        placement = self.expert_placements.get(prefix)
+        slots = len(placement.initial_local_expert_ids) if placement else self.local_experts
         H = self.hidden
         w[f"{prefix}pre_moe_norm"] = P(H)
         self._declare_matrix(w, f"{prefix}router", (self.num_experts, H), P)
@@ -264,12 +298,8 @@ class ShortcutDecoder(DecoderModel):
         self._declare_matrix(w, f"{prefix}fc1_latent", (self.latent, H), P)
         w[f"{prefix}fc2_norm"] = P(self.latent)
         self._declare_matrix(w, f"{prefix}fc2_latent", (H, self.latent), P)
-        self._declare_matrix(
-            w, f"{prefix}experts_up", (self.local_experts, self.expert_inter, self.latent), P
-        )
-        self._declare_matrix(
-            w, f"{prefix}experts_down", (self.local_experts, self.latent, self.expert_inter), P
-        )
+        self._declare_matrix(w, f"{prefix}experts_up", (slots, self.expert_inter, self.latent), P)
+        self._declare_matrix(w, f"{prefix}experts_down", (slots, self.latent, self.expert_inter), P)
         self._declare_matrix(w, f"{prefix}shared_up", (self.shared_inter, H), P)
         self._declare_matrix(w, f"{prefix}shared_down", (H, self.shared_inter), P)
 
@@ -321,6 +351,7 @@ class ShortcutDecoder(DecoderModel):
     def _moe_views(self, prefix: str) -> dict:
         w = self.w
         views = {"pre_moe_norm": w[f"{prefix}pre_moe_norm"]}
+        views["placement"] = self.expert_placements.get(prefix)
         for name in (
             "router",
             "fc1_latent",
@@ -413,11 +444,36 @@ class ShortcutDecoder(DecoderModel):
             **self.allreduce_args,
         )
 
+    def _adapted_mm(self, x, weight, name, layer, lora_params):
+        if not lora_params:
+            return self._mm(x, weight)
+        return LoraLayer.forward_with_base(
+            lambda: self._mm(x, weight), (self.adapters[str(layer)][name],), x, lora_params, layer
+        )
+
     def _attention(
-        self, local_layer: int, p: dict, x: torch.Tensor, step: dict, md, plan=None, layer=None
+        self,
+        local_layer: int,
+        p: dict,
+        x: torch.Tensor,
+        step: dict,
+        md,
+        plan=None,
+        layer=None,
+        lora_params=None,
     ) -> torch.Tensor:
         """Store every index key and use the selected causal keys on sparse steps."""
         qkv = self._mm(x, p["qkv"])
+        if lora_params:
+            adapters = self.adapters[str(layer)]
+            start = 0
+            for name in ("q", "k", "v"):
+                adapter = adapters[name]
+                width = adapter.output_hidden_sizes[0]
+                delta = adapter(x, lora_params, layer)
+                if delta is not None:
+                    qkv[:, start : start + width].add_(delta)
+                start += width
         out = torch.empty(x.shape[0], self.heads_q * self.head_dim, dtype=x.dtype, device=x.device)
         args = dict(
             local_layer_idx=local_layer,
@@ -431,19 +487,15 @@ class ShortcutDecoder(DecoderModel):
         if plan is not None:
             iqk = self._mm(x, p["idx"])
             plan.store(layer, iqk[:, self.index_dim :])
-            if plan.sparse:
-                plan.attend(qkv, out, plan.select(layer, iqk[:, : self.index_dim]), args)
-                return self._allreduce(self._mm(out, p["o"]))
-        thop_attention(q=qkv, output=out, **args)
-        return self._allreduce(self._mm(out, p["o"]))
+        if plan is not None and plan.sparse:
+            plan.attend(qkv, out, plan.select(layer, iqk[:, : self.index_dim]), args)
+        else:
+            thop_attention(q=qkv, output=out, **args)
+        return self._allreduce(self._adapted_mm(out, p["o"], "o", layer, lora_params))
 
-    def _mlp(self, x: torch.Tensor, up: torch.Tensor, down: torch.Tensor) -> torch.Tensor:
-        return self._allreduce(self._mlp_partial(x, up, down))
-
-    def _mlp_partial(self, x: torch.Tensor, up: torch.Tensor, down: torch.Tensor) -> torch.Tensor:
-        """This rank's column slice of the MLP, before the TP sum."""
-        h = clamped_relu2(self._mm(x, up), self.clamp)
-        return self._mm(h, down)
+    def _mlp(self, x, up, down, layer=None, lora_params=None):
+        h = clamped_relu2(self._adapted_mm(x, up, "up", layer, lora_params), self.clamp)
+        return self._allreduce(self._adapted_mm(h, down, "down", layer, lora_params))
 
     def _dp_sizes(self, all_rank_num_tokens, rows: int) -> list[int] | None:
         """Per-rank token counts for the attention-DP exchange, or None when
@@ -471,9 +523,14 @@ class ShortcutDecoder(DecoderModel):
         expert_op = (
             grouped_experts if isinstance(p["experts_up"], torch.Tensor) else self._grouped_experts
         )
+        placement = p.get("placement")
+        if placement is not None:
+            ids = placement.route(ids)
         mixed = expert_op(
             latent, ids, weights, p["experts_up"], p["experts_down"], self.moe_ep_rank, self.clamp
         )
+        if placement is not None:
+            placement.finish()
         mixed = (
             reducescatter(mixed, sizes, self.tp_group, self.process_group)
             if self.attn_dp
@@ -503,8 +560,8 @@ class ShortcutDecoder(DecoderModel):
         spec_metadata=None,
         lora_params=None,
     ):
-        if spec_metadata is not None or lora_params is not None:
-            raise ValueError("This decoder requires plain text generation.")
+        if spec_metadata is not None:
+            raise ValueError("ShortcutForCausalLM handles speculative decoding metadata.")
         md = attn_metadata
         embedding = (
             nn.functional.embedding(input_ids.long(), self.w["embed"])
@@ -535,7 +592,7 @@ class ShortcutDecoder(DecoderModel):
                 if kind == _GDP:
                     u = self._allreduce(self._mm(gdp_mixer(self, p, x, md, i), p["gdp_out"]))
                 else:
-                    u = self._mlp(x, p["up"], p["down"])
+                    u = self._mlp(x, p["up"], p["down"], i, lora_params)
                 pending = (u, p["res_write"], p["res_retain"])
             else:
                 # The router reads the block input, before the mixer writes.
@@ -545,7 +602,7 @@ class ShortcutDecoder(DecoderModel):
                     ((p["shortcut_read"], p["shortcut_norm"]), (p["mix_read"], p["norm_in"])),
                 )
                 if kind == _ATTN_MOE:
-                    u = self._attention(self._kv_layer[i], p, x, step, md, plan, i)
+                    u = self._attention(self._kv_layer[i], p, x, step, md, plan, i, lora_params)
                 else:
                     u = self._allreduce(self._mm(gdp_mixer(self, p, x, md, i), p["gdp_out"]))
                 streams, (shared_in,) = self._norm_reads(
@@ -562,6 +619,17 @@ class ShortcutDecoder(DecoderModel):
 
 class ShortcutForCausalLM(DecoderModelForCausalLM):
     resets_recurrent_state_in_context = True
+    lora_owner = DecoderLoraOwner(
+        module_path="model",
+        hf_targets=(
+            ("attn_q", "self_attn.q_proj"),
+            ("attn_k", "self_attn.k_proj"),
+            ("attn_v", "self_attn.v_proj"),
+            ("attn_dense", "self_attn.o_proj"),
+            ("mlp_h_to_4h", "mlp.up_proj"),
+            ("mlp_4h_to_h", "mlp.down_proj"),
+        ),
+    )
 
     @classmethod
     def get_preferred_kv_cache_manager_version(cls, pretrained_config=None):

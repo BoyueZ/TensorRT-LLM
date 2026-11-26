@@ -42,11 +42,16 @@ def make_lora_model_config(
     owner: DecoderLoraOwner,
 ) -> LoraModelConfig:
     """Describe the model to the LoRA stack, for the engine to record."""
+    kv_heads = getattr(model.config, "num_key_value_heads", None)
+    mapping = getattr(getattr(model, "model_config", None), "mapping", None)
+    if mapping is not None and mapping.enable_attention_dp:
+        kv_heads = None
     return LoraModelConfig(
         lora_target_modules=lora_target_modules,
         trtllm_modules_to_hf_modules=trtllm_modules_to_hf_modules,
         hidden_size=model.config.hidden_size,
         dtype=torch_dtype_to_str(model.config.torch_dtype),
+        num_key_value_heads=kv_heads if isinstance(kv_heads, int) else None,
         swap_gate_up_proj_lora_b_weight=swap_gate_up_proj_lora_b_weight,
         owner=owner,
     )

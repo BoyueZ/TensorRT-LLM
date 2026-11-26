@@ -100,6 +100,22 @@ class HostMoeTensorSharer:
         self.names = []
 
         self.loaded_shared_weights = []
+        self.checkpoint_banks = None
+
+    def register_checkpoint_banks(self, banks, slot_parameter):
+        """Register CPU weight planes indexed by logical expert ID.
+
+        Exports may store a fused bank or separate tensors per expert. Preserve
+        each rank's checkpoint views and their row pitches until native shutdown.
+        """
+        for name, bank in banks.items():
+            slots = slot_parameter(name)
+            if len(bank) != self.expert_count or any(
+                    t.device.type != "cpu" or t.dtype != slots.dtype
+                    or t.shape != slots.shape[1:] or t.ndim > 2 or
+                (t.ndim and t.stride(-1) != 1) for t in bank):
+                raise ValueError(f"Invalid CPU checkpoint expert bank {name}")
+        self.checkpoint_banks = banks
 
     def set_shared_memory_base_name(self, shared_memory_base_name):
         """
@@ -253,6 +269,13 @@ class HostMoeTensorSharer:
         """
         Finalize the host tensor sharing.
         """
+        if self.checkpoint_banks is not None:
+            if add_host_weight_fn is not None:
+                for name, bank in self.checkpoint_banks.items():
+                    for expert, weight in enumerate(bank):
+                        add_host_weight_fn(expert, name, weight)
+            return
+
         for rank in range(self.local_size):
             if rank == self.local_rank:
                 continue
@@ -295,6 +318,7 @@ class HostMoeTensorSharer:
         Call after the C++ load balancer has shut down, so no weight update
         still reads them, and before the barrier that lets the owner unlink them.
         """
+        self.checkpoint_banks = None
         for shm in self.imported_shms:
             shm.close()
             resource_tracker.unregister(shm._name, "shared_memory")
@@ -1141,11 +1165,14 @@ moe_model_arch_list = [
 def maybe_create_moe_load_balancer(
     model_config, mapping: Optional[Mapping]
 ) -> AbstractContextManager[BaseMoeLoadBalancer | None]:
+    from tensorrt_llm._torch.pyexecutor.config_utils import is_nemotron_shortcut
+
     ep_rank = model_config.mapping.moe_ep_rank
     ep_size = model_config.mapping.moe_ep_size
     model_arch = model_config.pretrained_config.architectures[0]
     using_ep = mapping and mapping.moe_ep_size > 1
-    in_supported_model_arch = model_arch in moe_model_arch_list
+    in_supported_model_arch = model_arch in moe_model_arch_list or is_nemotron_shortcut(
+        model_config.pretrained_config)
     using_smart_router = mapping and mapping.moe_cluster_size > 1
     moe_load_balancer: AbstractContextManager[BaseMoeLoadBalancer
                                               | None] = nullcontext()

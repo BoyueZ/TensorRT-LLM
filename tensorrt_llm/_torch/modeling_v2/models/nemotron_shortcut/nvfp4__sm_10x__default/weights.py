@@ -6,7 +6,15 @@ from dataclasses import dataclass
 
 import torch
 
-from ..manifest import block_columns, check_checkpoint_keys, copy_checked, load_unquantized
+from ..manifest import (
+    block_columns,
+    check_checkpoint_keys,
+    copy_checked,
+    dynamic_placements,
+    expert_ids,
+    load_unquantized,
+    pad_expert_weight,
+)
 from .ops import Fp8Projection, Nvfp4Projection
 
 
@@ -18,6 +26,7 @@ class Projection:
     shape: tuple
     # Source and destination windows in uncompressed matrix coordinates.
     windows: list
+    online: bool = False
 
     @property
     def is_bank(self):
@@ -25,11 +34,16 @@ class Projection:
 
     @property
     def suffixes(self):
+        if self.algorithm == "BF16":
+            return ("weight",)
         if self.algorithm == "NVFP4":
             return ("weight", "weight_scale", "input_scale", "weight_scale_2")
         return ("weight", "weight_scale", "input_scale")
 
     def declare(self, weights, P):
+        if self.algorithm == "BF16":
+            weights[self.name] = P(*self.shape)
+            return
         *bank, rows, cols = self.shape
         scalars = bank or [1]
         weights[self.name + "_input_scale"] = P(*scalars, dtype=torch.float32)
@@ -46,6 +60,8 @@ class Projection:
         weights[self.name + "_weight_scale_2"] = P(*scalars, dtype=torch.float32)
 
     def view(self, w):
+        if self.algorithm == "BF16":
+            return w[self.name]
         scale = w[self.name + "_input_scale"]
         block = w[self.name + "_weight_scale"]
         if self.algorithm == "FP8":
@@ -56,6 +72,7 @@ class Projection:
             scale.reciprocal(),
             scale * w[self.name + "_weight_scale_2"],
             self.shape[-2],
+            (scale, w[self.name + "_weight_scale_2"]) if self.online else None,
         )
 
     def module(self, expert=None):
@@ -65,13 +82,25 @@ class Projection:
         return f"{group}.{expert}.{proj}"
 
 
-def projection_parts(name, shape, entries, recipe):
+def projection_parts(name, shape, entries, recipe, is_excluded=None):
     """Separate Q/K/V and index Q/K because their calibrated scales can differ."""
     sources = {}
     for key, window, dest, _ in entries:
         sources.setdefault(key, []).append((window, dest))
     parts = []
     bank = len(shape) == 3
+    excluded = {key for key in sources if is_excluded and is_excluded(key.removesuffix(".weight"))}
+    if excluded:
+        if len(excluded) != len(sources) or any(
+            key.rsplit(".", 1)[0] in recipe for key in excluded
+        ):
+            raise ValueError(f"{name}: conflicting mixed-precision and exclusion rules")
+        if not bank:
+            return []
+        # The mixed export stores unquantized draft experts one tensor per expert.
+        ((key, windows),) = sources.items()
+        return [Projection(name, key, "BF16", shape, windows)]
+
     for i, (key, windows) in enumerate(sources.items()):
         module = key.rsplit(".", 1)[0]
         config = recipe.get(module)
@@ -107,7 +136,7 @@ def _copy_scalar(weights, key, target):
 def _load_projection(part, w, weights):
     if part.is_bank:
         ((window, _),) = part.windows
-        local = range(window[0].start, window[0].stop)
+        local = expert_ids(window[0])
         windows = [(window[1:], None)]
     else:
         local = (None,)
@@ -116,6 +145,10 @@ def _load_projection(part, w, weights):
         module = part.module(expert)
         name = part.name
         weight = w[name][i] if part.is_bank else w[name]
+        if part.algorithm == "BF16":
+            key = module + ".weight"
+            load_unquantized(weight, [(key, src, dst, None) for src, dst in windows], weights)
+            continue
         scale = w[name + "_weight_scale"]
         inp_scale = w[name + "_input_scale"][i]
         _copy_scalar(weights, module + ".input_scale", inp_scale)
@@ -145,6 +178,30 @@ def _load_projection(part, w, weights):
         if nvfp4:
             swizzled = torch.ops.trtllm.block_scale_interleave(linear)
             scale.copy_(swizzled.reshape(-1).view(torch.uint8))
+
+
+def _bind_expert_banks(core, weights):
+    for prefix, placement in dynamic_placements(core):
+        host = {}
+        for plane in ("up", "down"):
+            (part,) = core.projections[f"{prefix}experts_{plane}"]
+            ((window, _),) = part.windows
+            part.online = True
+            rows = core.w[part.name].shape[-2:]
+            for expert in range(core.num_experts):
+                key = part.module(expert)
+                weight = weights[key + ".weight"][block_columns(window[1:], 2)].cpu()
+                linear = weights[key + ".weight_scale"][block_columns(window[1:], 16)].cpu()
+                scale = torch.ops.trtllm.block_scale_interleave(
+                    linear.view(torch.uint8).contiguous()
+                )
+                host.setdefault(plane, []).append(pad_expert_weight(weight, rows))
+                host.setdefault(plane + "_weight_scale", []).append(scale.flatten())
+                for suffix in ("input_scale", "weight_scale_2"):
+                    host.setdefault(plane + "_" + suffix, []).append(
+                        weights[key + "." + suffix][()].cpu()
+                    )
+        placement.bind_weights(core.w, prefix, host)
 
 
 def _check_keys(core, weights):
@@ -178,6 +235,7 @@ def load(model, weights):
                 _load_projection(part, core.w, weights)
             continue
         load_unquantized(core.w[name], entries, weights)
+    _bind_expert_banks(core, weights)
 
     head = model.lm_head
     if head.weight.dtype != torch.float8_e4m3fn:

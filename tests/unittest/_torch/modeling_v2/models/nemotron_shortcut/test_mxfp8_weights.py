@@ -18,11 +18,15 @@ def test_projection_windows_select_corresponding_scale_blocks(expert_bank):
     name = "projection"
     if expert_bank:
         shape = (4, 7, 192)
-        entries = [(name, (slice(2, 4), slice(None), slice(32, 128)), None, None)]
-        selected = (slice(2, 4), slice(None), slice(32, 128))
-        scale_selected = (slice(2, 4), slice(None), slice(1, 4))
+        # Physical slots can hold non-contiguous logical experts and replicas.
+        experts = [3, 0, 3]
+        bank = (len(experts),)
+        entries = [(name, (experts, slice(None), slice(32, 128)), None, None)]
+        selected = (experts, slice(None), slice(32, 128))
+        scale_selected = (experts, slice(None), slice(1, 4))
     else:
         shape = (15, 96)
+        bank = ()
         entries = [
             (name, (slice(2, 5),), (slice(0, 3),), None),
             (name, (slice(9, 13),), (slice(3, 7),), None),
@@ -32,7 +36,6 @@ def test_projection_windows_select_corresponding_scale_blocks(expert_bank):
     packed = (weight % 113).to(torch.float8_e4m3fn)
     blocks = (weight[..., ::32] // 32 % 251 + 1).to(torch.uint8)
     checkpoint = {name: packed, name + "_scale": blocks}
-    bank = (2,) if expert_bank else ()
     target = torch.empty((*bank, 128, 128), device="cuda", dtype=torch.float8_e4m3fn)
     scales = torch.empty((*bank, 512), device="cuda", dtype=torch.uint8)
     _load_projection(checkpoint, entries, target, scales, (7, 96))

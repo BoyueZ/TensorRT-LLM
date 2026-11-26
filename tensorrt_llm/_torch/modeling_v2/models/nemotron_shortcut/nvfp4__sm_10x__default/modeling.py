@@ -15,6 +15,7 @@ from .weights import load, projection_parts
 class MixedDecoder(ShortcutDecoder):
     def __init__(self, model_config):
         self.recipe = model_config.quant_config_dict or {}
+        self.quant_config = model_config.quant_config
         self.projections = {}
         self.weight_manifest = None
         super().__init__(model_config)
@@ -32,7 +33,13 @@ class MixedDecoder(ShortcutDecoder):
     def _declare_matrix(self, weights, name, shape, P):
         if self.weight_manifest is None:
             self.weight_manifest = _manifest(self)
-        parts = projection_parts(name, shape, self.weight_manifest[name], self.recipe)
+        parts = projection_parts(
+            name,
+            shape,
+            self.weight_manifest[name],
+            self.recipe,
+            self.quant_config.is_module_excluded_from_quantization,
+        )
         if not parts:
             super()._declare_matrix(weights, name, shape, P)
             return

@@ -5,6 +5,8 @@
 from transformers.configuration_utils import PretrainedConfig
 from transformers.models.pixtral.configuration_pixtral import PixtralVisionConfig
 
+from tensorrt_llm.checkpoint_format import NEMOTRON_SHORTCUT_MODEL_TYPE
+
 _MIXER_TYPES = {
     "linear_attention": "linear_attention",
     "full_attention": "full_attention",
@@ -144,7 +146,7 @@ class NemotronShortcutTextConfig(PretrainedConfig):
 class NemotronShortcutConfig(PretrainedConfig):
     """Composite checkpoint wrapper exposing the decoder via get_text_config()."""
 
-    model_type = "nemotron4"
+    model_type = NEMOTRON_SHORTCUT_MODEL_TYPE
     sub_configs = {"text_config": NemotronShortcutTextConfig, "vision_config": PixtralVisionConfig}
     text_config: dict | NemotronShortcutTextConfig | None = None
     vision_config: dict | PixtralVisionConfig | None = None
