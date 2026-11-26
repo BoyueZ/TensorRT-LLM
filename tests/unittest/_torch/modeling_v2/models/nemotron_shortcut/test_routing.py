@@ -4,7 +4,10 @@
 import pytest
 import torch
 
-from tensorrt_llm._torch.configs.nemotron_shortcut import NemotronShortcutTextConfig
+from tensorrt_llm._torch.configs.nemotron_shortcut import (
+    NemotronShortcutConfig,
+    NemotronShortcutTextConfig,
+)
 from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm._torch.modeling_v2._router_index import NoTarget
 from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.routing import route
@@ -20,14 +23,24 @@ pytestmark = pytest.mark.cpu_only
 def test_mtp_two_draft_tokens_share_one_checkpoint_layer():
     text = NemotronShortcutTextConfig(num_nextn_predict_layers=2, mtp_use_repeated_layer=True)
     spec = MTPDecodingConfig(max_draft_len=2)
-    update_spec_config_from_model_config(spec, text)
+    update_spec_config_from_model_config(spec, NemotronShortcutConfig(text_config=text))
     assert spec.spec_dec_mode.is_mtp_eagle_one_model()
     assert spec.num_nextn_predict_layers == 1
     assert spec.max_draft_len == spec.max_total_draft_tokens == text.num_nextn_predict_layers == 2
 
 
 def _route(
-    quant, world, moe_tp, *, state="auto", stochastic=False, capability=(10, 3), spec=None, **recipe
+    quant,
+    world,
+    moe_tp,
+    *,
+    state="auto",
+    stochastic=False,
+    capability=(10, 3),
+    spec=None,
+    vision=False,
+    disable_mm_encoder=False,
+    **recipe,
 ):
     text = NemotronShortcutTextConfig(
         dtype=torch.bfloat16,
@@ -39,10 +52,11 @@ def _route(
         mtp_use_repeated_layer=True,
         moe_shortcut_disable_mtp=True,
     )
+    checkpoint = NemotronShortcutConfig(text_config=text, vision_config={}) if vision else text
     if spec is not None:
-        update_spec_config_from_model_config(spec, text)
+        update_spec_config_from_model_config(spec, checkpoint)
     model = ModelConfig(
-        pretrained_config=text,
+        pretrained_config=checkpoint,
         spec_config=spec,
         mapping=Mapping(
             world_size=world, tp_size=world, moe_tp_size=moe_tp, moe_ep_size=world // moe_tp
@@ -56,6 +70,7 @@ def _route(
     args = TorchLlmArgs(
         model="/tmp/dummy_model",
         modeling_v2="require",
+        disable_mm_encoder=disable_mm_encoder,
         kv_cache_config=KvCacheConfig(
             dtype="bfloat16",
             mamba_ssm_cache_dtype=state,
@@ -74,7 +89,11 @@ def _route(
     ],
 )
 def test_four_rank_mixed_expert_parallelism_uses_default(quant, state, target):
-    assert _route(quant, 4, 2, state=state).__module__.split(".")[-2] == target
+    text = _route(quant, 4, 2, state=state)
+    assert text.__module__.split(".")[-2] == target
+    assert _route(quant, 4, 2, state=state, vision=True, disable_mm_encoder=True) is text
+    visual = _route(quant, 4, 2, state=state, vision=True)
+    assert visual is not text and issubclass(visual, text)
 
 
 @pytest.mark.parametrize("quant,world", [(None, 2), (QuantAlgo.MIXED_PRECISION, 8)])

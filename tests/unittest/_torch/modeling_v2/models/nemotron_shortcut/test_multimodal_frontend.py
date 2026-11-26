@@ -10,7 +10,10 @@ from PIL import Image
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 
-from tensorrt_llm._torch.configs.nemotron_shortcut import NemotronShortcutConfig
+from tensorrt_llm._torch.configs.nemotron_shortcut import (
+    NemotronShortcutConfig,
+    NemotronShortcutTextConfig,
+)
 from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.input_processor import (
     ShortcutInputProcessor,
 )
@@ -117,18 +120,40 @@ def test_patch_order_follows_learned_merge(processor: ShortcutInputProcessor) ->
     assert patches[0, :4].tolist() == [0, 1 / 64, 8 / 64, 9 / 64]
 
 
+@pytest.mark.parametrize("layout", ["text", "flat_vision", "media_config"])
+def test_load_flat_checkpoint(tmp_path: Path, layout: str):
+    fields = {"vision_config": {"patch_size": 14}, "image_token_id": 123}
+    text = NemotronShortcutTextConfig(hidden_size=96)
+    config = text.to_dict()
+    if layout == "media_config":
+        config["media_config"] = fields
+    elif layout == "flat_vision":
+        config.update(fields)
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    loaded = load_pretrained_config(str(tmp_path))
+    assert loaded.get_text_config().hidden_size == 96
+    if layout == "text":
+        assert isinstance(loaded, NemotronShortcutTextConfig)
+    else:
+        assert isinstance(loaded, NemotronShortcutConfig)
+        assert loaded.image_token_id == 123 and loaded.vision_config.patch_size == 14
+
+
 def test_chat_placeholder_and_disabled_encoder(processor: ShortcutInputProcessor) -> None:
     path = Path(processor.model_path)
     config = NemotronShortcutConfig(vision_config={}, dtype="bfloat16", image_token_id=1)
     config.save_pretrained(path)
     chat_config = load_pretrained_config(str(path))
+    assert isinstance(chat_config, NemotronShortcutConfig)
     enabled = create_input_processor(str(path), processor.tokenizer)
     assert isinstance(enabled, ShortcutInputProcessor)
     model_type = resolve_top_level_model_type(chat_config)
     assert retrieve_multimodal_placeholder(model_type, "image", 1) == "<nemo:img>"
 
+    (path / "processor_config.json").unlink()
     disabled = create_input_processor(str(path), processor.tokenizer, disable_mm_encoder=True)
     process = create_input_processor_with_hash(disabled)
+    assert process({"prompt": "<end>"}, SamplingParams(add_special_tokens=False)) == ([3], None)
     image = Image.new("RGB", (4, 4))
     for prompt in ({"prompt": "<nemo:img>"}, {"prompt_token_ids": [1]}):
         with pytest.raises(ValueError, match="disable_mm_encoder=True"):

@@ -934,6 +934,8 @@ def update_spec_config_from_model_config(spec_config,
     language_config = getattr(model_config, "llm_config", None)
     if language_config is not None and is_nemotron_hybrid(language_config):
         model_config = language_config
+    elif is_nemotron_shortcut(model_config):
+        model_config = model_config.get_text_config()
 
     # When MTP heads live in a separate checkpoint, prefer that checkpoint's
     # layer count / pattern over the target model's (which may have no MTP or

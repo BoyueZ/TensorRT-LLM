@@ -16,7 +16,7 @@ from PIL import Image
 from transformers import AutoProcessor, AutoTokenizer, PretrainedConfig, PreTrainedTokenizerBase
 
 from tensorrt_llm.inputs.content_format import ContentFormat
-from tensorrt_llm.inputs.data import TextPrompt
+from tensorrt_llm.inputs.data import TextPrompt, TokensPrompt
 from tensorrt_llm.inputs.evs import compute_retained_tokens_from_tubelet_budget
 from tensorrt_llm.inputs.multimodal import (
     MULTIMODAL_ENCODER_ITEM_METADATA_KEY,
@@ -27,6 +27,7 @@ from tensorrt_llm.inputs.multimodal_data import VideoData
 from tensorrt_llm.inputs.registry import (
     BaseMultimodalDummyInputsBuilder,
     BaseMultimodalInputProcessor,
+    DefaultInputProcessor,
     ExtraProcessedInputs,
     MultimodalPlaceholderMetadata,
 )
@@ -90,6 +91,36 @@ def _unit_rgb(image: ImageInput) -> np.ndarray:
     if image.ndim != 3 or image.shape[-1] != 3 or image.dtype != np.uint8:
         raise ValueError("An image array must be uint8 RGB in HWC order.")
     return image.astype(np.float32) / np.float32(255)
+
+
+class ShortcutTextInputProcessor(DefaultInputProcessor):
+    """Tokenize text when the Shortcut vision encoder is disabled."""
+
+    supports_tokenization_cache = True
+
+    def __init__(
+        self,
+        model_path: str,
+        config: PretrainedConfig,
+        tokenizer: PreTrainedTokenizerBase | None,
+        *,
+        enable_tokenization_cache: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(
+            model_path, config, tokenizer, enable_tokenization_cache=enable_tokenization_cache
+        )
+        self.multimodal_hashing_supported = False
+
+    def __call__(
+        self, inputs: TextPrompt | TokensPrompt, sampling_params: SamplingParams
+    ) -> tuple[list[int], ExtraProcessedInputs | None]:
+        for items in (inputs.get("multi_modal_data") or {}).values():
+            if items is not None and (not isinstance(items, (list, tuple)) or items):
+                raise ValueError("Raw media cannot be processed with disable_mm_encoder=True.")
+        if "prompt" in inputs:
+            return super().__call__(inputs, sampling_params)
+        return inputs["prompt_token_ids"], None
 
 
 class ShortcutInputProcessor(BaseMultimodalInputProcessor, BaseMultimodalDummyInputsBuilder):
