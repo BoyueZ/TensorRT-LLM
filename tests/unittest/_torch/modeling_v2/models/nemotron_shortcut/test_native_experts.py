@@ -218,7 +218,7 @@ def test_separate_attention_scales_and_padded_segmented_projection():
     torch.testing.assert_close(view.apply(x), want.to(x.dtype), rtol=0, atol=0)
 
     # An idle attention-DP rank still reaches the MoE collective with its
-    # actual local width. None of the three projections should launch a GEMM.
+    # actual local width.
     for projection, width in ((views[0], rows), (views, 3 * rows), (view, 43)):
         got = Nvfp4Decoder._project(x[:0], projection)
         assert got.shape == (0, width) and got.dtype == x.dtype and got.device == x.device
@@ -228,7 +228,7 @@ def test_separate_attention_scales_and_padded_segmented_projection():
     not torch.cuda.is_available() or torch.cuda.get_device_capability() not in ((10, 0), (10, 3)),
     reason="masked grouped NVFP4 requires Blackwell SM100/SM103",
 )
-def test_expert_batch_scale_alignment_and_graph_replay():
+def test_expert_graph_replay_matches_eager_after_routing_change():
     from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.nvfp4__sm_103__default.ops import (
         Nvfp4Projection,
     )

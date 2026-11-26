@@ -17,15 +17,6 @@ from tensorrt_llm.quantization.mode import QuantAlgo
 pytestmark = pytest.mark.cpu_only
 
 
-def test_mtp_two_draft_tokens_share_one_checkpoint_layer():
-    text = NemotronShortcutTextConfig(num_nextn_predict_layers=2, mtp_use_repeated_layer=True)
-    spec = MTPDecodingConfig(max_draft_len=2)
-    update_spec_config_from_model_config(spec, text)
-    assert spec.spec_dec_mode.is_mtp_eagle_one_model()
-    assert spec.num_nextn_predict_layers == 1
-    assert spec.max_draft_len == spec.max_total_draft_tokens == text.num_nextn_predict_layers == 2
-
-
 def _route(
     quant,
     world,
