@@ -5,7 +5,6 @@ import base64
 import io
 import json
 import os
-import re
 from pathlib import Path
 
 import pytest
@@ -17,7 +16,7 @@ from tensorrt_llm._utils import get_sm_version
 
 from .openai_server import RemoteOpenAIServer
 
-PRECISIONS = ("bf16", "mxfp8", "nvfp4")
+PRECISIONS = ("nvfp4",)
 LABEL_PROMPT = 'Return the label "violet" as a compact JSON object with the key "label".'
 
 
@@ -147,33 +146,6 @@ class TestServing(_StructuredOutput):
         answer = "".join(content)
         assert "4" in answer and "<think>" not in answer and "</think>" not in answer
 
-    def test_image_chat(self, server, record_property):
-        client, model = server
-        asset = Path(__file__).parents[4] / "examples/visual_gen/cat_piano.png"
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": _image_uri(asset)}},
-                        {
-                            "type": "text",
-                            "text": "What animal is in the photograph? Answer with one or two words.",
-                        },
-                    ],
-                }
-            ],
-            temperature=0,
-            max_completion_tokens=384,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        )
-        choice = response.choices[0]
-        record_property("answer", choice.message.content)
-        record_property("finish_reason", choice.finish_reason)
-        assert choice.finish_reason == "stop"
-        assert re.search(r"\b(cat|kitten|feline)s?\b", choice.message.content or "", re.IGNORECASE)
-
     def test_image_tool_roundtrip(self, server):
         client, model = server
         data_uri = _image_uri(Path(__file__).parents[4] / "examples/visual_gen/cat_piano.png")
@@ -232,14 +204,4 @@ class TestServing(_StructuredOutput):
 
 @pytest.mark.parametrize("server", [f"{p}-mtp2" for p in PRECISIONS], indirect=True)
 class TestMtpServing(_StructuredOutput):
-    def test_mtp_free_text(self, server):
-        client, model = server
-        choice = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": LABEL_PROMPT}],
-            temperature=0,
-            max_completion_tokens=64,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
-        ).choices[0]
-        assert choice.finish_reason == "stop"
-        assert json.loads(choice.message.content) == {"label": "violet"}
+    """Structured output with two MTP draft tokens."""

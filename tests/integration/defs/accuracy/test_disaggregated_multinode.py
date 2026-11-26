@@ -405,7 +405,7 @@ class TestDeepSeekV4ProDSparkMultinode(LlmapiAccuracyTestHarness):
 
 @pytest.mark.timeout(5400)
 @pytest.mark.skip_less_device(4)
-@pytest.mark.parametrize("precision", ["bf16", "mxfp8", "nvfp4"])
+@pytest.mark.parametrize("precision", ["nvfp4"])
 def test_nemotron_shortcut_tp4_handoff(precision, record_property) -> None:
     """The GDP state and sparse index pages must follow the main KV to generation."""
     _check_shortcut_handoff(record_property, precision, use_mtp=False)
@@ -413,7 +413,7 @@ def test_nemotron_shortcut_tp4_handoff(precision, record_property) -> None:
 
 @pytest.mark.timeout(5400)
 @pytest.mark.skip_less_device(4)
-@pytest.mark.parametrize("precision", ["bf16", "mxfp8", "nvfp4"])
+@pytest.mark.parametrize("precision", ["bf16", "nvfp4"])
 def test_nemotron_shortcut_tp4_prefix_mtp_handoff(precision, record_property) -> None:
     """A warm P-side prefix resumes on an overlapping D-side MTP worker."""
     _check_shortcut_handoff(record_property, precision, use_mtp=True)

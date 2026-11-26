@@ -14,7 +14,7 @@ from ._engine import shortcut_text_engine
 @pytest.mark.skip_less_device(4)
 @pytest.mark.parametrize("precision", ["bf16", "mxfp8", "nvfp4"])
 def test_deterministic_batch_invariance(model_root, precision, record_property):
-    # The second prompt previously changed its eighth greedy token when co-batched.
+    # Sixteen seeded random prompts, enough to fill the decode batch.
     prompts = []
     for index in range(16):
         rng = random.Random(225110 + index)

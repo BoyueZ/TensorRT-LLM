@@ -18,7 +18,7 @@ class TestShortcutNvfp4(ShortcutTextAccuracy):
 
 @pytest.mark.skip_less_device(4)
 def test_mtp_greedy_matches_ordinary_decode(model_root):
-    # This short prompt previously diverged at token eight during three-row verification.
+    # With two draft tokens, each step verifies three rows.
     prompt = "Answer with the name of the city. The capital of France is"
     window = 2176
 

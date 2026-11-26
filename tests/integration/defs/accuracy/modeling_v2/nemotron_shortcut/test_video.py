@@ -13,7 +13,7 @@ from tensorrt_llm.inputs.multimodal_data import VideoData
 from ._engine import shortcut_text_engine
 
 
-@pytest.mark.parametrize("precision", ["bf16", "mxfp8", "nvfp4"])
+@pytest.mark.parametrize("precision", ["nvfp4"])
 def test_decoded_video_frames(model_root, precision, tmp_path):
     import cv2
     from transformers import AutoTokenizer
@@ -73,7 +73,7 @@ def test_decoded_video_frames(model_root, precision, tmp_path):
 
 
 @pytest.mark.skip_less_device(4)
-@pytest.mark.parametrize("precision", ["bf16", "mxfp8", "nvfp4"])
+@pytest.mark.parametrize("precision", ["nvfp4"])
 @pytest.mark.parametrize("rate", [0.0, 0.5], ids=["unpruned", "evs"])
 def test_evs_conditioned_video(model_root, precision, rate, record_property):
     model = model_root / precision

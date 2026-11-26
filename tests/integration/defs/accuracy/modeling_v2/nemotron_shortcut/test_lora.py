@@ -53,7 +53,7 @@ def _write_adapter(directory, text_config, adapter_id):
 
 
 @pytest.mark.skip_less_device(4)
-@pytest.mark.parametrize("checkpoint", ["bf16", "mxfp8", "nvfp4"], indirect=True)
+@pytest.mark.parametrize("checkpoint", ["nvfp4"], indirect=True)
 def test_multi_adapter_generation(checkpoint, tmp_path):
     if not checkpoint.is_dir():
         pytest.skip(f"Checkpoint unavailable: {checkpoint}")

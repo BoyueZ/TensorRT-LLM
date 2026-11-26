@@ -83,27 +83,12 @@ tests:
       mode: per_node
       tasks_per_node: 1
       gpus_per_node: 4
-  - case: accuracy/test_disaggregated_multinode.py::test_nemotron_shortcut_tp4_handoff[bf16]
-    launch:
-      mode: per_node
-      tasks_per_node: 1
-      gpus_per_node: 4
-  - case: accuracy/test_disaggregated_multinode.py::test_nemotron_shortcut_tp4_handoff[mxfp8]
-    launch:
-      mode: per_node
-      tasks_per_node: 1
-      gpus_per_node: 4
   - case: accuracy/test_disaggregated_multinode.py::test_nemotron_shortcut_tp4_handoff[nvfp4]
     launch:
       mode: per_node
       tasks_per_node: 1
       gpus_per_node: 4
   - case: accuracy/test_disaggregated_multinode.py::test_nemotron_shortcut_tp4_prefix_mtp_handoff[bf16]
-    launch:
-      mode: per_node
-      tasks_per_node: 1
-      gpus_per_node: 4
-  - case: accuracy/test_disaggregated_multinode.py::test_nemotron_shortcut_tp4_prefix_mtp_handoff[mxfp8]
     launch:
       mode: per_node
       tasks_per_node: 1

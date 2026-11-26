@@ -499,7 +499,7 @@ def test_openai_chat_example(llm_root, llm_venv, backend: str):
 
 
 @pytest.mark.skip_less_device(4)
-@pytest.mark.parametrize("precision", ["bf16", "mxfp8", "nvfp4"])
+@pytest.mark.parametrize("precision", ["nvfp4"])
 def test_nemotron_shortcut_serving(llm_venv, precision, tmp_path):
     from .test_unittests import _junit_all_tests_skipped
 

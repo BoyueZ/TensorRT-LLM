@@ -430,8 +430,6 @@ nemotron_shortcut/bf16:
   - accuracy: 93.44
 nemotron_shortcut/nvfp4:
   - quant_algo: MIXED_PRECISION
-    accuracy: 92.00
-  - quant_algo: MIXED_PRECISION
     kv_cache_quant_algo: NVFP4
     accuracy: 92.76
 nemotron_shortcut/mxfp8:

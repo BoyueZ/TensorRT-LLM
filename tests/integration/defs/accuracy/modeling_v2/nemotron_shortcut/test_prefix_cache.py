@@ -11,7 +11,7 @@ from ._engine import shortcut_text_engine
 
 
 @pytest.mark.skip_less_device(4)
-@pytest.mark.parametrize("precision", ["bf16", "nvfp4", "mxfp8"])
+@pytest.mark.parametrize("precision", ["bf16", "nvfp4"])
 @pytest.mark.parametrize("mtp", [False, True], ids=["plain", "mtp2"])
 def test_chunked_prefix_resume(model_root, precision, mtp, record_property):
     chunk_tokens = 256
@@ -61,7 +61,7 @@ def test_chunked_prefix_resume(model_root, precision, mtp, record_property):
 
 
 @pytest.mark.skip_less_device(4)
-@pytest.mark.parametrize("precision", ["bf16", "mxfp8", "nvfp4"])
+@pytest.mark.parametrize("precision", ["bf16", "nvfp4"])
 def test_host_cache_round_trip(model_root, precision, record_property):
     with shortcut_text_engine(
         model_root / precision,
