@@ -70,7 +70,6 @@ class _DecodedMemoryReservation(Protocol):
 
 
 _DecodedMemoryReserver = Callable[[int, int], _DecodedMemoryReservation]
-_VideoFrameSampler = Callable[[int, float, int, float], tuple[list[int], list[float]]]
 
 
 def _decoded_video_bytes(video: Any) -> int:
@@ -847,7 +846,6 @@ def _load_video_by_cv2(
     raw_bytes_hash: Optional[str] = None,
     max_decoded_frame_bytes: Optional[int] = None,
     decoded_memory_reserver: Optional[_DecodedMemoryReserver] = None,
-    frame_sampler: Optional[_VideoFrameSampler] = None,
 ) -> VideoData:
     """Decode a video and return sampled frames as a list.
 
@@ -914,29 +912,14 @@ def _load_video_by_cv2(
             raise ValueError("Video has no frames or invalid FPS.")
 
         duration = frame_count / original_fps
-        sample_metadata = {}
-        if frame_sampler is not None:
-            sequence, timestamps = frame_sampler(frame_count, original_fps, num_frames, fps)
-            if (
-                not sequence
-                or len(sequence) != len(timestamps)
-                or min(sequence) < 0
-                or max(sequence) >= frame_count
-            ):
-                raise ValueError(
-                    "The model's video sampler returned invalid frame indices or timestamps."
-                )
-            indices = sorted(set(sequence))
-            num_frames_to_sample = len(indices)
-            sample_metadata = {"sampled_frame_indices": sequence, "sampled_timestamps": timestamps}
-        else:
-            num_frames_to_sample = frame_count
-            if num_frames > 0:
-                num_frames_to_sample = min(num_frames, frame_count)
-            if fps > 0:
-                num_frames_to_sample = min(num_frames_to_sample, math.floor(duration * fps))
-            num_frames_to_sample = max(1, num_frames_to_sample)
-            indices = np.linspace(0, frame_count - 1, num_frames_to_sample, dtype=int).tolist()
+        num_frames_to_sample = frame_count
+        if num_frames > 0:
+            num_frames_to_sample = min(num_frames, frame_count)
+        if fps > 0:
+            num_frames_to_sample = min(num_frames_to_sample, math.floor(duration * fps))
+        num_frames_to_sample = max(1, num_frames_to_sample)  # at least one sample
+
+        indices = np.linspace(0, frame_count - 1, num_frames_to_sample, dtype=int).tolist()
 
         # Defer allocating the stacked buffer until the first frame is actually
         # decoded: container metadata (CAP_PROP_FRAME_WIDTH/HEIGHT) can be 0
@@ -1052,7 +1035,6 @@ def _load_video_by_cv2(
             "fps": original_fps,
             "duration": duration,
             "frames_indices": valid_indices,
-            **sample_metadata,
         }
     except BaseException:
         if decoded_memory_reservation is not None:
@@ -1780,7 +1762,6 @@ class VideoMediaIO(BaseMediaIO[VideoData]):
         extract_audio: bool = False,
         max_decoded_frame_bytes: Optional[int] = None,
         decoded_memory_reserver: Optional[_DecodedMemoryReserver] = None,
-        frame_sampler: Optional[_VideoFrameSampler] = None,
     ) -> None:
         # `"pt"` is the safe default every video model handles; models tuned
         # for the uint8-HWC path opt into `"np"` via
@@ -1796,9 +1777,6 @@ class VideoMediaIO(BaseMediaIO[VideoData]):
         self._extract_audio = extract_audio
         self._max_decoded_frame_bytes = max_decoded_frame_bytes
         self._decoded_memory_reserver = decoded_memory_reserver
-        if frame_sampler is not None and not callable(frame_sampler):
-            raise ValueError("frame_sampler must be a callable supplied by the model processor.")
-        self._frame_sampler = frame_sampler
 
     @classmethod
     def merge_kwargs(
@@ -1806,15 +1784,13 @@ class VideoMediaIO(BaseMediaIO[VideoData]):
         default_kwargs: Optional[Dict[str, Any]],
         runtime_kwargs: Optional[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        if runtime_kwargs and "frame_sampler" in runtime_kwargs:
-            raise ValueError("Only the model processor may set frame_sampler.")
         merged = super().merge_kwargs(default_kwargs, runtime_kwargs)
         # `fps` and `num_frames` together determine the time window of the
         # sampled clip. If a request overrides one without the other, keeping
         # the server's value for the unmentioned key produces a clip that
         # likely does not match the client's intent. Drop the unmentioned
         # default so the loader falls back to its built-in for that key.
-        if runtime_kwargs and not merged.get("frame_sampler"):
+        if runtime_kwargs:
             if "num_frames" in runtime_kwargs and "fps" not in runtime_kwargs:
                 merged.pop("fps", None)
             elif "fps" in runtime_kwargs and "num_frames" not in runtime_kwargs:
@@ -1842,7 +1818,6 @@ class VideoMediaIO(BaseMediaIO[VideoData]):
                 raw_bytes_hash=raw_bytes_hash,
                 max_decoded_frame_bytes=self._max_decoded_frame_bytes,
                 decoded_memory_reserver=self._decoded_memory_reserver,
-                frame_sampler=self._frame_sampler,
             )
         with tempfile.NamedTemporaryFile(suffix=".mp4", dir=_VIDEO_TEMPFILE_DIR) as tmp:
             tmp.write(data)
@@ -1857,7 +1832,6 @@ class VideoMediaIO(BaseMediaIO[VideoData]):
                 raw_bytes_hash=raw_bytes_hash,
                 max_decoded_frame_bytes=self._max_decoded_frame_bytes,
                 decoded_memory_reserver=self._decoded_memory_reserver,
-                frame_sampler=self._frame_sampler,
             )
 
     def load_base64(self, media_type: str, data: str) -> VideoData:

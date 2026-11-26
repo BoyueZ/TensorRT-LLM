@@ -30,7 +30,7 @@ class _TokenEmbeddings:
 class ShortcutMedia:
     supported_encoder_attention_backends = {"vision": frozenset()}
     supports_mm_encoder_item_scheduling = False
-    multimodal_data_device_paths = ("image.patches", "video.patches")
+    multimodal_data_device_paths = ("image.patches",)
 
     def __init__(self, model_config):
         super().__init__(model_config)
@@ -57,7 +57,7 @@ class ShortcutMedia:
         return self.dtype
 
     def encode_multimodal_inputs(self, multimodal_params):
-        return self.vision(multimodal_params, self.text_embedding_layer)
+        return self.vision(multimodal_params)
 
     def load_weights(self, weights, *args, **kwargs):
         super().load_weights(weights, *args, **kwargs)

@@ -5,25 +5,21 @@
 import json
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoProcessor, AutoTokenizer, PretrainedConfig, PreTrainedTokenizerBase
+from transformers import AutoTokenizer, PretrainedConfig, PreTrainedTokenizerBase
 
 from tensorrt_llm.inputs.content_format import ContentFormat
 from tensorrt_llm.inputs.data import TextPrompt, TokensPrompt
-from tensorrt_llm.inputs.evs import compute_retained_tokens_from_tubelet_budget
 from tensorrt_llm.inputs.multimodal import (
     MULTIMODAL_ENCODER_ITEM_METADATA_KEY,
     MultimodalItemMetadata,
     MultimodalItemPartition,
 )
-from tensorrt_llm.inputs.multimodal_data import VideoData
 from tensorrt_llm.inputs.registry import (
     BaseMultimodalDummyInputsBuilder,
     BaseMultimodalInputProcessor,
@@ -33,34 +29,11 @@ from tensorrt_llm.inputs.registry import (
 )
 from tensorrt_llm.sampling_params import SamplingParams
 
-_VIDEO_PLACEHOLDER = "<nemo:video>"
-_MAX_VIDEO_FRAMES = 64
-_DEFAULT_VIDEO_FPS = 2
-
 PLACEHOLDER_METADATA = MultimodalPlaceholderMetadata(
-    placeholder_map={"image": "<nemo:img>", "video": _VIDEO_PLACEHOLDER},
+    placeholder_map={"image": "<nemo:img>"},
     content_format=ContentFormat.OPENAI,
 )
 ImageInput = Image.Image | np.ndarray | torch.Tensor
-
-
-@dataclass(frozen=True)
-class _VideoSampler:
-    # Keep nonportable filesystem paths out of the model's media-settings fingerprint.
-    model_path: str = field(repr=False)
-    trust_remote_code: bool = field(repr=False)
-
-    @property
-    @lru_cache(maxsize=4)
-    def processor(self):
-        return AutoProcessor.from_pretrained(
-            self.model_path, trust_remote_code=self.trust_remote_code
-        )
-
-    def __call__(self, count: int, source_fps: float, max_frames: int, fps: float):
-        return self.processor.sample_video_frames(
-            count, source_fps, max_frames=max_frames, sampling_fps=fps, temporal_patch_size=1
-        )
 
 
 def _size(image: ImageInput) -> tuple[int, int]:
@@ -136,14 +109,9 @@ class ShortcutInputProcessor(BaseMultimodalInputProcessor, BaseMultimodalDummyIn
         tokenizer: PreTrainedTokenizerBase | None,
         trust_remote_code: bool = True,
         enable_tokenization_cache: bool = False,
-        video_pruning_rate: float | None = None,
         **kwargs: Any,
     ) -> None:
         super().__init__(model_path, config, tokenizer, trust_remote_code, **kwargs)
-        self.video_pruning_rate = video_pruning_rate or 0.0
-        self._video_sampler = _VideoSampler(model_path, trust_remote_code)
-        if self.video_pruning_rate and "video" not in self.supported_modalities:
-            raise ValueError("EVS requires a checkpoint with a single-frame video processor.")
         spec = json.loads((Path(model_path) / "processor_config.json").read_text())
         img = spec["image_processor"]
         self.patch = int(spec["patch_size"])
@@ -198,127 +166,10 @@ class ShortcutInputProcessor(BaseMultimodalInputProcessor, BaseMultimodalDummyIn
 
     @property
     def supported_modalities(self) -> frozenset[str]:
-        if getattr(self.config, "video_temporal_patch_size", None) == 1:
-            return frozenset(("image", "video"))
         return frozenset(("image",))
 
     def get_preferred_media_io_kwargs(self) -> dict[str, dict[str, Any]]:
-        options = {"image": {"format": "pil"}}
-        if "video" in self.supported_modalities:
-            options["video"] = {
-                "format": "np",
-                "num_frames": _MAX_VIDEO_FRAMES,
-                "fps": _DEFAULT_VIDEO_FPS,
-                "frame_sampler": self._video_sampler,
-            }
-        return options
-
-    def _video_layout(self, frames, metadata):
-        if not metadata or "fps" not in metadata:
-            raise ValueError("Video sampling requires source FPS in VideoData.metadata.")
-        if "sampled_frame_indices" in metadata:
-            indices, times = metadata["sampled_frame_indices"], metadata["sampled_timestamps"]
-            if not indices or len(indices) != len(times):
-                raise ValueError(
-                    "Sampled frame indices and timestamps must be nonempty and aligned."
-                )
-        else:
-            indices, times = self._video_sampler(
-                metadata.get("total_num_frames", len(frames)),
-                metadata["fps"],
-                _MAX_VIDEO_FRAMES,
-                _DEFAULT_VIDEO_FPS,
-            )
-        decoded = {i: j for j, i in enumerate(metadata.get("frames_indices", range(len(frames))))}
-        try:
-            selected = [frames[decoded[i]] for i in indices]
-        except KeyError as exc:
-            raise ValueError(
-                "A video decode override excluded a frame required by the checkpoint sampler."
-            ) from exc
-        size = self._resized(selected[0])
-        text = self._video_sampler.processor.get_video_prompt(
-            times, temporal_patch_size=1, frame_size=size
-        )
-        height, width = (edge // self.unit for edge in size)
-        if not self.video_pruning_rate:
-            return selected, size, text, [], len(selected) * height * (width + 1)
-        # The text between the first and last patch includes row ends and timestamps.
-        # Its actual positions depend on the encoder's retention mask. Reserve the
-        # exact final length and fuse these text embeddings with surviving patches.
-        left = text.index(self.image_token)
-        right = text.rindex(self.image_end) + len(self.image_end)
-        template = self.tokenizer.encode(text[left:right], add_special_tokens=False)
-        num_patches = len(selected) * height * width
-        retained = compute_retained_tokens_from_tubelet_budget(
-            len(selected), height * width, self.video_pruning_rate
-        )
-        count = len(template) - num_patches + retained
-        return (
-            selected,
-            size,
-            text[:left] + self.image_token * count + text[right:],
-            template,
-            count,
-        )
-
-    def get_num_tokens_per_video(self, *, video, video_metadata=None, **kwargs) -> int:
-        return self._video_layout(video, video_metadata)[-1]
-
-    def _prepare_videos(self, prompt, videos, sampling_params):
-        pieces = prompt.split(_VIDEO_PLACEHOLDER)
-        if len(pieces) != len(videos) + 1 or self.image_token in prompt:
-            raise ValueError("Each video requires one video placeholder and no image placeholders.")
-        expanded, patches, sizes, templates, costs, outputs = [pieces[0]], [], [], [], [], []
-        for video, suffix in zip(videos, pieces[1:], strict=True):
-            if not isinstance(video, VideoData):
-                raise ValueError(
-                    "Video inputs require VideoData with decoded frames and source FPS."
-                )
-            frames, size, text, template, count = self._video_layout(video.frames, video.metadata)
-            for frame in frames:
-                patch_rows, frame_size = self.preprocess_image(frame)
-                if frame_size != size:
-                    raise ValueError("All frames of a video must have the same processed size.")
-                patches.append(patch_rows)
-            cost = len(frames) * (size[0] // self.patch) * (size[1] // self.patch)
-            costs.append(cost)
-            outputs.append(count if template else cost // self.merge**2)
-            expanded.extend((text, suffix))
-            sizes.append(size)
-            templates.append(template)
-        ids = self._encode_media_prompt(expanded, sampling_params)
-        if ids.count(self._token_ids[0]) != sum(outputs):
-            raise ValueError("The tokenized prompt must retain all video embedding positions.")
-        return ids, {
-            "multimodal_data": self._video_payload(
-                torch.cat(patches), sizes, templates, costs, outputs
-            )
-        }
-
-    def _video_payload(self, patches, sizes, templates, costs, outputs):
-        metadata = MultimodalItemMetadata(
-            [("video", i) for i in range(len(sizes))],
-            encoder_token_lengths=costs,
-            output_embedding_lengths=outputs,
-            input_partitions={
-                "video": {
-                    "patches": MultimodalItemPartition(item_lengths=tuple(costs)),
-                    "frame_sizes": MultimodalItemPartition(),
-                    "templates": MultimodalItemPartition(),
-                    "pruning_rate": MultimodalItemPartition(item_axis=None),
-                }
-            },
-        )
-        return {
-            "video": {
-                "patches": patches,
-                "frame_sizes": sizes,
-                "templates": templates,
-                "pruning_rate": self.video_pruning_rate,
-            },
-            MULTIMODAL_ENCODER_ITEM_METADATA_KEY: metadata,
-        }
+        return {"image": {"format": "pil"}}
 
     def _resized(self, image: ImageInput) -> tuple[int, int]:
         height, width = _size(image)
@@ -389,18 +240,9 @@ class ShortcutInputProcessor(BaseMultimodalInputProcessor, BaseMultimodalDummyIn
         media = inputs.get("multi_modal_data") or {}
         if unknown := media.keys() - self.supported_modalities:
             raise ValueError(f"Unsupported Shortcut media: {sorted(unknown)}.")
-        images = media.get("image", ())
+        images = media.get("image", [])
         if not isinstance(images, (tuple, list)):
             images = [images]
-        videos = media.get("video", ())
-        if not isinstance(videos, (tuple, list)):
-            videos = [videos]
-        if videos:
-            if images:
-                raise ValueError("The checkpoint accepts either images or videos per request.")
-            return self._prepare_videos(prompt, videos, sampling_params)
-        if _VIDEO_PLACEHOLDER in prompt:
-            raise ValueError("A video placeholder requires a video input.")
         if not images and self.image_token not in prompt:
             token_ids = self._encode_with_tokenization_cache(prompt, sampling_params)
             if token_ids is not None:
@@ -414,7 +256,12 @@ class ShortcutInputProcessor(BaseMultimodalInputProcessor, BaseMultimodalDummyIn
             patches.append(rows)
             sizes.append(size)
             expanded.extend((self._image_block(*size), suffix))
-        ids = self._encode_media_prompt(expanded, sampling_params)
+        options = {}
+        if sampling_params.truncate_prompt_tokens is not None:
+            options.update(truncation=True, max_length=sampling_params.truncate_prompt_tokens)
+        ids = self.tokenizer.encode(
+            "".join(expanded), add_special_tokens=sampling_params.add_special_tokens, **options
+        )
         if not images:
             return ids, None
         payload = self._payload(torch.cat(patches), sizes)
@@ -423,31 +270,15 @@ class ShortcutInputProcessor(BaseMultimodalInputProcessor, BaseMultimodalDummyIn
             raise ValueError("The tokenized prompt must retain all image embedding positions.")
         return ids, {"multimodal_data": payload}
 
-    def _encode_media_prompt(self, pieces, sampling_params):
-        options = {}
-        if sampling_params.truncate_prompt_tokens is not None:
-            options.update(truncation=True, max_length=sampling_params.truncate_prompt_tokens)
-        return self.tokenizer.encode(
-            "".join(pieces), add_special_tokens=sampling_params.add_special_tokens, **options
-        )
-
     def get_mm_max_tokens_per_item(
         self, max_num_encoder_tokens: int | None = None
     ) -> dict[str, int]:
         maximum = (math.ceil(self.longest / self.unit) * self.merge) ** 2
-        caps = {"image": maximum}
-        if "video" in self.supported_modalities:
-            caps["video"] = _MAX_VIDEO_FRAMES * maximum
-        if max_num_encoder_tokens is None:
-            return caps
-        budget = max_num_encoder_tokens // self.merge**2 * self.merge**2
-        return {key: min(cap, budget) for key, cap in caps.items()} if budget else {}
+        if max_num_encoder_tokens is not None:
+            maximum = min(maximum, max_num_encoder_tokens // self.merge**2 * self.merge**2)
+        return {"image": maximum} if maximum else {}
 
-    def get_max_mm_encoder_output_embeddings(self, max_num_encoder_tokens: int) -> int | None:
-        if self.video_pruning_rate:
-            # The retained sequence includes variable-length timestamp labels. The checkpoint's
-            # inline encoder uses exact item lengths and does not use item scheduling.
-            return None
+    def get_max_mm_encoder_output_embeddings(self, max_num_encoder_tokens: int) -> int:
         return max_num_encoder_tokens // self.merge**2
 
     def get_mm_encoder_attention_metadata_capacity(self, max_num_tokens: int) -> dict[str, int]:
@@ -460,11 +291,9 @@ class ShortcutInputProcessor(BaseMultimodalInputProcessor, BaseMultimodalDummyIn
         mm_counts: Mapping[str, int],
         dtype: torch.dtype | None = None,
     ) -> dict:
-        if mm_counts.keys() - self.supported_modalities or any(n < 0 for n in mm_counts.values()):
+        if mm_counts.keys() - self.supported_modalities or mm_counts.get("image", 0) < 0:
             raise ValueError("Unsupported modalities or negative counts for encoder profiling.")
-        if mm_counts.get("image") and mm_counts.get("video"):
-            raise ValueError("The checkpoint accepts either images or videos per request.")
-        count = sum(mm_counts.values())
+        count = mm_counts.get("image", 0)
         if not count:
             return {}
         tile = self.merge**2
@@ -473,31 +302,9 @@ class ShortcutInputProcessor(BaseMultimodalInputProcessor, BaseMultimodalDummyIn
             math.isqrt(max_num_encoder_tokens // (count * tile)),
         )
         if edge == 0:
-            raise ValueError("Encoder budget is too small to profile the requested media.")
+            raise ValueError("Encoder budget is too small to profile the requested images.")
         size = edge * self.unit
-        cost = edge**2 * tile
-        frames = (
-            min(_MAX_VIDEO_FRAMES, max_num_encoder_tokens // (count * cost))
-            if mm_counts.get("video")
-            else 1
-        )
         rows = torch.zeros(
-            (count * frames * cost, 3 * self.patch**2), dtype=dtype or torch.bfloat16
+            (count * edge**2 * tile, 3 * self.patch**2), dtype=dtype or torch.bfloat16
         )
-        sizes = [(size, size)] * count
-        if not mm_counts.get("video"):
-            return self._payload(rows, sizes)
-        template, output = [], frames * edge**2
-        if self.video_pruning_rate:
-            frame = Image.new("RGB", (size, size))
-            _, _, _, template, output = self._video_layout(
-                [frame] * frames,
-                {
-                    "fps": _DEFAULT_VIDEO_FPS,
-                    "sampled_frame_indices": list(range(frames)),
-                    "sampled_timestamps": [i / _DEFAULT_VIDEO_FPS for i in range(frames)],
-                },
-            )
-        return self._video_payload(
-            rows, sizes, [template] * count, [frames * cost] * count, [output] * count
-        )
+        return self._payload(rows, [(size, size)] * count)
