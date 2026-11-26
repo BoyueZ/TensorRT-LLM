@@ -53,10 +53,11 @@ class Mxfp8Decoder(ShortcutDecoder):
             )
         return super()._matrix_view(name)
 
-    def _mm(self, x, weight, *, out_dtype=None):
+    @staticmethod
+    def _project(x, weight, *, out_dtype=None):
         if isinstance(weight, Mxfp8Projection):
             return weight.apply(x)
-        return super()._mm(x, weight, out_dtype=out_dtype)
+        return ShortcutDecoder._project(x, weight, out_dtype=out_dtype)
 
     _grouped_experts = staticmethod(grouped_quantized_experts)
 

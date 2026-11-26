@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Packed text decoder with wide residual connections, GDP and shortcut MoE."""
 
+import os
+
 import torch
 from torch import nn
 
+from tensorrt_llm._torch.distributed.allreduce_helper import force_all_reduce_deterministic
 from tensorrt_llm._torch.modeling_v2.catalog.attention.thop_attention import thop_attention
 from tensorrt_llm._torch.modeling_v2.catalog.comm.allgather import allgather
 from tensorrt_llm._torch.modeling_v2.catalog.comm.allreduce import allreduce, allreduce_group_args
@@ -108,6 +111,8 @@ class ShortcutDecoder(DecoderModel):
         self.tp_size = tp
         self.dp_size = mapping.tp_size if self.attn_dp else 1
         self.tp_group = list(mapping.tp_group)
+        self.deterministic_allreduce = force_all_reduce_deterministic()
+        self.batch_invariant = os.getenv("FORCE_DETERMINISTIC", "0") == "1"
         self.allreduce_args = (
             allreduce_group_args(mapping, strategy=int(AllReduceStrategy.NCCL))
             if mapping.tp_size > 1
@@ -186,6 +191,7 @@ class ShortcutDecoder(DecoderModel):
                 attention_layers,
                 self.num_sms,
                 index_dim=self.index_dim,
+                batch_invariant=self.batch_invariant,
             )
             if self.index_topk is not None
             else None
@@ -356,16 +362,45 @@ class ShortcutDecoder(DecoderModel):
             self.index.bind(md, self.w["final_norm"].device)
 
     @staticmethod
-    def _mm(x, weight, *, out_dtype=None):
+    def _project(x, weight, *, out_dtype=None):
         if x.shape[0] == 0:
             return x.new_empty((0, weight.shape[1]), dtype=out_dtype or x.dtype)
         return cublas_mm(x, weight, out_dtype=out_dtype)
+
+    def _apply_rows(self, op, x, *args, **kwargs):
+        if not self.batch_invariant or x.shape[0] == 0:
+            return op(x, *args, **kwargs)
+        # GEMM and RMS reductions both change their reduction tree with M.
+        # Keep their launch shape identical for single and co-batched tokens.
+        rows_per_launch = 128
+        outputs = []
+        for chunk in x.split(rows_per_launch):
+            count = chunk.shape[0]
+            if count < rows_per_launch:
+                chunk = nn.functional.pad(chunk, (0, 0, 0, rows_per_launch - count))
+            outputs.append(op(chunk.contiguous(), *args, **kwargs)[:count])
+        return outputs[0] if len(outputs) == 1 else torch.cat(outputs)
+
+    def _mm(self, x, weight, *, out_dtype=None):
+        return self._apply_rows(self._project, x, weight, out_dtype=out_dtype)
+
+    def _norm(self, x, weight):
+        return self._apply_rows(_rms_norm, x, weight, self.eps)
 
     _grouped_experts = staticmethod(grouped_experts)
 
     def _allreduce(self, x):
         if self.tp_size == 1:
             return x
+        if self.deterministic_allreduce:
+            # NCCL can change the reduction tree with the packed token count.
+            # Gather in rank order and use the same FP32 additions for every row.
+            gathered = allgather(x.contiguous(), None, self.tp_group, self.process_group)
+            ranks = gathered.view(self.tp_size, *x.shape)
+            total = ranks[0].float()
+            for contribution in ranks[1:]:
+                total = total + contribution.float()
+            return total.to(x.dtype)
         return allreduce(
             x,
             residual=None,
@@ -444,9 +479,7 @@ class ShortcutDecoder(DecoderModel):
             if self.attn_dp
             else self._allreduce(mixed)
         )
-        routed = self._mm(
-            _rms_norm(mixed.to(latent.dtype), p["fc2_norm"], self.eps), p["fc2_latent"]
-        )
+        routed = self._mm(self._norm(mixed.to(latent.dtype), p["fc2_norm"]), p["fc2_latent"])
         return routed + self._mlp(shared_in, p["shared_up"], p["shared_down"])
 
     def _norm_reads(self, streams, pending, reads):
@@ -458,7 +491,7 @@ class ShortcutDecoder(DecoderModel):
         outputs = []
         for factors, weight in reads:
             mixed = torch.matmul(factors, streams).to(weight.dtype)
-            outputs.append(_rms_norm(mixed, weight, self.eps))
+            outputs.append(self._norm(mixed, weight))
         return streams, outputs
 
     def forward(

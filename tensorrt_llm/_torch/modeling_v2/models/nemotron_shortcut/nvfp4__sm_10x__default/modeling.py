@@ -46,9 +46,10 @@ class MixedDecoder(ShortcutDecoder):
         parts = [part.view(self.w) for part in self.projections[name]]
         return parts[0] if len(parts) == 1 else parts
 
-    def _mm(self, x, weight, **kwargs):
+    @staticmethod
+    def _project(x, weight, *, out_dtype=None):
         if isinstance(weight, torch.Tensor):
-            return super()._mm(x, weight, **kwargs)
+            return ShortcutDecoder._project(x, weight, out_dtype=out_dtype)
         if isinstance(weight, list):
             return torch.cat([part.apply(x) for part in weight], dim=-1)
         return weight.apply(x)
