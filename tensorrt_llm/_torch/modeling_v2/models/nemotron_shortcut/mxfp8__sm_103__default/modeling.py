@@ -5,7 +5,7 @@
 import torch
 
 from ..decoder import ShortcutDecoder, ShortcutForCausalLM
-from ..manifest import _manifest
+from ..manifest import build_manifest
 from ..moe import grouped_quantized_experts
 from .ops import Mxfp8Projection
 from .weights import load
@@ -20,7 +20,7 @@ class Mxfp8Decoder(ShortcutDecoder):
 
     def _declare_matrix(self, weights, name, shape, P):
         if self.weight_manifest is None:
-            self.weight_manifest = _manifest(self)
+            self.weight_manifest = build_manifest(self)
         sources = {key for key, *_ in self.weight_manifest[name]}
         quantized = {
             key

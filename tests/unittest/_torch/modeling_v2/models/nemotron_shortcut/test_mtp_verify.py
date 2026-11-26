@@ -37,7 +37,7 @@ def test_gdp_verify_promotes_each_requests_accepted_prefix():
         gdp_dk=dk,
         gdp_eps=1e-5,
         gdp_g_clamp_value=20.0,
-        _mm=F.linear,
+        mm=F.linear,
     )
 
     def rand(*shape):

@@ -5,11 +5,11 @@ import pytest
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import KvCacheConfig, MTPDecodingConfig
 
-from .._common import _ShortcutTextAccuracy
+from .._common import ShortcutTextAccuracy
 from .._engine import shortcut_text_engine
 
 
-class TestShortcutNvfp4(_ShortcutTextAccuracy):
+class TestShortcutNvfp4(ShortcutTextAccuracy):
     MODEL_NAME = "nemotron_shortcut/nvfp4"
 
     def test_gsm8k(self):

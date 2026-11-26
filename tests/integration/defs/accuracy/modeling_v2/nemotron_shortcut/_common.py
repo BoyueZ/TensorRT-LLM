@@ -13,7 +13,7 @@ from ._engine import shortcut_text_engine
 
 
 @pytest.mark.skip_less_device(4)
-class _ShortcutTextAccuracy(LlmapiAccuracyTestHarness):
+class ShortcutTextAccuracy(LlmapiAccuracyTestHarness):
     def evaluate_gsm8k(self):
         with shortcut_text_engine(
             Path(llm_models_root()) / self.MODEL_NAME,

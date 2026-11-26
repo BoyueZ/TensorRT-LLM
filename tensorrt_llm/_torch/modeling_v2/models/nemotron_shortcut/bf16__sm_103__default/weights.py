@@ -5,7 +5,7 @@
 import torch
 
 from ..manifest import (
-    _manifest,
+    build_manifest,
     check_checkpoint_keys,
     dynamic_placements,
     load_unquantized,
@@ -17,7 +17,7 @@ from ..manifest import (
 def load(model, weights):
     """Load only the local shards and check both checkpoint and destination coverage."""
     core = model.model
-    manifest = _manifest(core)
+    manifest = build_manifest(core)
     parameters = dict(core.w.items())
     if set(manifest) != set(parameters):
         raise ValueError(f"Parameter manifest mismatch: {sorted(set(manifest) ^ set(parameters))}")

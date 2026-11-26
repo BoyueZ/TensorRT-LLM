@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.decoder import _rms_norm
+from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.decoder import rms_norm
 from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.lora import (
     HF_PROJECTIONS,
     ShortcutLoraOwner,
@@ -75,7 +75,7 @@ def test_branch_norm_rounds_before_applying_weight():
     x = torch.tensor([[1, 3, 5, 7]], dtype=torch.bfloat16)
     weight = torch.tensor([1.25, 1.5, 1.75, 2.25], dtype=x.dtype)
     expected = torch.tensor([[0.271484375, 0.984375, 1.9140625, 3.4375]], dtype=x.dtype)
-    torch.testing.assert_close(_rms_norm(x, weight, 1e-6), expected, atol=0, rtol=0)
+    torch.testing.assert_close(rms_norm(x, weight, 1e-6), expected, atol=0, rtol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA-backed GDP state")

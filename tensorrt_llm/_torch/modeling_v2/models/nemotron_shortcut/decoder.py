@@ -93,7 +93,7 @@ _CONNECTIONS = {
 }
 
 
-def _rms_norm(x, weight, eps):
+def rms_norm(x, weight, eps):
     wide = x.float()
     normalized = wide * torch.rsqrt(wide.square().mean(-1, keepdim=True) + eps)
     return normalized.to(x.dtype) * weight
@@ -143,24 +143,17 @@ class ShortcutDecoder(DecoderModel):
         self.clamp = float(cfg.activation_clamp_value)
         # Split query heads across ranks and replicate a single KV head.
         self.head_dim = cfg.head_dim
-        assert cfg.num_attention_heads % tp == 0, "query heads must split over tp"
         self.heads_q = cfg.num_attention_heads // tp
-        assert cfg.num_key_value_heads % tp == 0 or tp % cfg.num_key_value_heads == 0
         self.heads_kv_global = cfg.num_key_value_heads
         self.heads_kv = max(1, cfg.num_key_value_heads // tp)
-        assert self.head_dim in (64, 128, 256), "thop_attention head_size set"
-        assert self.heads_q % self.heads_kv == 0, "thop_attention GQA rule"
         # Each sparse layer replicates the index projection across ranks.
         self.index_topk = cfg.index_topk
         self.index_dim = cfg.index_head_dim
-        if self.index_topk is not None:
-            assert self.heads_kv_global == 1, "the token-sparse rows address one KV head"
 
         self.m = cfg.gdp_num_householder
         self.num_sms = torch.cuda.get_device_properties(
             torch.cuda.current_device()
         ).multi_processor_count
-        assert cfg.gdp_num_heads % tp == 0 and cfg.gdp_num_groups % tp == 0
         self.gdp_heads = cfg.gdp_num_heads // tp
         self.gdp_groups = cfg.gdp_num_groups // tp
         self.gdp_dv = cfg.gdp_head_dim
@@ -171,15 +164,9 @@ class ShortcutDecoder(DecoderModel):
         self.gdp_v = self.gdp_heads * self.gdp_dv
         self.gdp_k = self.gdp_groups * self.gdp_dk
         self.gdp_conv = self.m * self.gdp_v + (self.m + 1) * self.gdp_k
-        # The gated output norm runs per value head (`gated_rmsnorm_heads`).
-        norm_group = (cfg.gdp_num_heads * cfg.gdp_head_dim) // cfg.gdp_num_groups
-        assert norm_group == self.gdp_dv, "gated-norm groups are the value heads"
-        self.gdp_norm_group = norm_group
         self.gdp_proj = self.gdp_v + self.gdp_conv + (self.m + 1) * self.gdp_heads
 
-        assert cfg.intermediate_size % tp == 0
         self.inter = cfg.intermediate_size // tp
-        assert cfg.moe_shared_expert_intermediate_size % tp == 0
         self.shared_inter = cfg.moe_shared_expert_intermediate_size // tp
 
         # Routed experts: split by expert over EP, by column over MoE-TP.
@@ -188,10 +175,9 @@ class ShortcutDecoder(DecoderModel):
         self.topk = cfg.num_experts_per_tok
         self.routed_scale = float(cfg.routed_scaling_factor)
         self.latent = cfg.moe_latent_size
-        assert self.num_experts % ep == 0 and cfg.moe_intermediate_size % moe_tp == 0
         self.expert_inter = cfg.moe_intermediate_size // moe_tp
         self.local_experts = self.num_experts // ep
-        self.moe_ep_size, self.moe_ep_rank = ep, mapping.moe_ep_rank
+        self.moe_ep_rank = mapping.moe_ep_rank
         self.expert_placements = {}
         if getattr(model_config, "moe_load_balancer", None) is not None:
             from .expert_placement import create_placements
@@ -422,15 +408,15 @@ class ShortcutDecoder(DecoderModel):
             outputs.append(op(chunk.contiguous(), *args, **kwargs)[:count])
         return outputs[0] if len(outputs) == 1 else torch.cat(outputs)
 
-    def _mm(self, x, weight, *, out_dtype=None):
+    def mm(self, x, weight, *, out_dtype=None):
         return self._apply_rows(self._project, x, weight, out_dtype=out_dtype)
 
     def _norm(self, x, weight):
-        return self._apply_rows(_rms_norm, x, weight, self.eps)
+        return self._apply_rows(rms_norm, x, weight, self.eps)
 
     _grouped_experts = staticmethod(grouped_experts)
 
-    def _allreduce(self, x):
+    def tp_reduce(self, x):
         if self.tp_size == 1:
             return x
         x = x.contiguous()
@@ -457,12 +443,12 @@ class ShortcutDecoder(DecoderModel):
 
     def _adapted_mm(self, x, weight, name, layer, lora_params):
         if not lora_params:
-            return self._mm(x, weight)
+            return self.mm(x, weight)
         return LoraLayer.forward_with_base(
-            lambda: self._mm(x, weight), (self.adapters[str(layer)][name],), x, lora_params, layer
+            lambda: self.mm(x, weight), (self.adapters[str(layer)][name],), x, lora_params, layer
         )
 
-    def _attention(
+    def attention(
         self,
         local_layer: int,
         p: dict,
@@ -475,7 +461,7 @@ class ShortcutDecoder(DecoderModel):
         lora_params=None,
     ) -> torch.Tensor:
         """Store every index key and use the selected causal keys on sparse steps."""
-        qkv = self._mm(x, p["qkv"])
+        qkv = self.mm(x, p["qkv"])
         if lora_params:
             adapters = self.adapters[str(layer)]
             start = 0
@@ -488,7 +474,7 @@ class ShortcutDecoder(DecoderModel):
                 start += width
         iq = None
         if plan is not None:
-            iq, ik = self._mm(x, p["idx"]).split(self.index_dim, dim=-1)
+            iq, ik = self.mm(x, p["idx"]).split(self.index_dim, dim=-1)
             plan.store(layer, ik)
         if self.nvfp4_kv:
             out = plan.attend_nvfp4(layer, qkv, iq, p["kv_scales"], p["inv_kv_scales"])
@@ -526,10 +512,10 @@ class ShortcutDecoder(DecoderModel):
         )
         return None if len(set(sizes)) == 1 else sizes
 
-    def _moe(self, p, routed_in, shared_in, all_rank_num_tokens, tp_reduce):
-        logits = self._mm(routed_in, p["router"], out_dtype=torch.float32)
+    def moe(self, p, routed_in, shared_in, all_rank_num_tokens, tp_reduce):
+        logits = self.mm(routed_in, p["router"], out_dtype=torch.float32)
         weights, ids = routing_weights(logits, p["router_bias"], self.topk, self.routed_scale)
-        latent = self._mm(routed_in, p["fc1_latent"])
+        latent = self.mm(routed_in, p["fc1_latent"])
         sizes = None
         if self.attn_dp:
             sizes = self._dp_sizes(all_rank_num_tokens, latent.shape[0])
@@ -554,7 +540,7 @@ class ShortcutDecoder(DecoderModel):
             if self.attn_dp
             else tp_reduce(mixed)
         )
-        routed = self._mm(self._norm(mixed.to(latent.dtype), p["fc2_norm"]), p["fc2_latent"])
+        routed = self.mm(self._norm(mixed.to(latent.dtype), p["fc2_norm"]), p["fc2_latent"])
         return routed + self._mlp(shared_in, p["shared_up"], p["shared_down"], tp_reduce)
 
     def _read_streams(self, streams, factors, weight):
@@ -590,13 +576,13 @@ class ShortcutDecoder(DecoderModel):
             if self.attn_dp and any(md.all_rank_num_tokens):
                 for p in self._layers:
                     if p["kind"] in (_ATTN_MOE, _GDP_MOE):
-                        self._moe(p, embedding, embedding, md.all_rank_num_tokens, self._allreduce)
+                        self.moe(p, embedding, embedding, md.all_rank_num_tokens, self.tp_reduce)
             return embedding
         if not self._kv_layer:
             self._bind_cache_layout(md)
         decode = md.num_contexts == 0
         step = attention_step_args(md, n_rows=embedding.shape[0], decode=decode)
-        read_streams, tp_reduce = self._read_streams, self._allreduce
+        read_streams, tp_reduce = self._read_streams, self.tp_reduce
         width = step["predicted_tokens_per_seq"]
         if self.nvfp4_kv and width > 1:
             # Both the FP32 stream contraction and the NCCL sum can change their
@@ -618,7 +604,7 @@ class ShortcutDecoder(DecoderModel):
                     streams, pending, ((p["res_read"], p["norm_in"]),), read_streams
                 )
                 if kind == _GDP:
-                    u = tp_reduce(self._mm(gdp_mixer(self, p, x, md, i), p["gdp_out"]))
+                    u = tp_reduce(self.mm(gdp_mixer(self, p, x, md, i), p["gdp_out"]))
                 else:
                     u = self._mlp(x, p["up"], p["down"], tp_reduce, i, lora_params)
                 pending = (u, p["res_write"], p["res_retain"])
@@ -631,18 +617,18 @@ class ShortcutDecoder(DecoderModel):
                     read_streams,
                 )
                 if kind == _ATTN_MOE:
-                    u = self._attention(
+                    u = self.attention(
                         self._kv_layer[i], p, x, step, md, tp_reduce, plan, i, lora_params
                     )
                 else:
-                    u = tp_reduce(self._mm(gdp_mixer(self, p, x, md, i), p["gdp_out"]))
+                    u = tp_reduce(self.mm(gdp_mixer(self, p, x, md, i), p["gdp_out"]))
                 streams, (shared_in,) = self._norm_reads(
                     streams,
                     (u, p["mix_write"], p["mix_retain"]),
                     ((p["moe_read"], p["pre_moe_norm"]),),
                     read_streams,
                 )
-                u = self._moe(p, routed_in, shared_in, md.all_rank_num_tokens, tp_reduce)
+                u = self.moe(p, routed_in, shared_in, md.all_rank_num_tokens, tp_reduce)
                 pending = (u, p["moe_write"], p["moe_retain"])
 
         _, (out,) = self._norm_reads(

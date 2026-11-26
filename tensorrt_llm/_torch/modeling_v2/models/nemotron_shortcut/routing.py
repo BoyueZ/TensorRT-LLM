@@ -18,7 +18,7 @@ _FOUR_RANK_LAYOUTS = {
     (4, True, 2, 2),
     (4, True, 4, 1),
 }
-_MIXED_LAYOUTS = _FOUR_RANK_LAYOUTS | {
+_QUANTIZED_LAYOUTS = _FOUR_RANK_LAYOUTS | {
     (1, False, 1, 1),
     (2, False, 1, 2),
     (2, False, 2, 1),
@@ -69,7 +69,8 @@ def route(model_config, llm_args, compute_capability):
         kv_quant != QuantAlgo.NVFP4 or quant != QuantAlgo.MIXED_PRECISION or cfg.index_topk is None
     ):
         raise NoTarget(
-            "Quantized KV requires the Super NVFP4 checkpoint with NVSA and NVFP4 pages."
+            "Quantized KV requires the mixed-precision checkpoint with sparse attention "
+            "and NVFP4 pages."
         )
     cache = llm_args.kv_cache_config
     if (
@@ -114,6 +115,7 @@ def route(model_config, llm_args, compute_capability):
         or cfg.gdp_head_dim > cfg.gdp_key_head_dim
         or cfg.gdp_key_head_dim != 128
         or cfg.num_key_value_heads != 1
+        or cfg.head_dim not in (64, 128, 256)
         or cfg.tie_word_embeddings
         or cfg.mlp_hidden_act != "relu2"
         or not cfg.activation_clamp_value
@@ -143,7 +145,7 @@ def route(model_config, llm_args, compute_capability):
         recipe = model_config.quant_config
         if "group_size" in recipe.model_fields_set and recipe.group_size not in (None, 32):
             raise NoTarget("The MXFP8 text decoder requires 32-element scale blocks.")
-        if layout not in _MIXED_LAYOUTS or mapping.world_size == 1:
+        if layout not in _QUANTIZED_LAYOUTS or mapping.world_size == 1:
             raise NoTarget(f"Unsupported MXFP8 text decoder mapping: {layout}.")
         if media:
             from .mxfp8__sm_103__default.multimodal import ShortcutMxfp8ForConditionalGeneration
@@ -153,13 +155,13 @@ def route(model_config, llm_args, compute_capability):
 
         return ShortcutMxfp8ForCausalLM
     if quant == QuantAlgo.MIXED_PRECISION:
-        if layout not in _MIXED_LAYOUTS:
+        if layout not in _QUANTIZED_LAYOUTS:
             raise NoTarget(f"Unsupported mixed-precision text decoder mapping: {layout}.")
         if media:
-            from .nvfp4__sm_103__default.multimodal import ShortcutMixedForConditionalGeneration
+            from .nvfp4__sm_103__default.multimodal import ShortcutNvfp4ForConditionalGeneration
 
-            return ShortcutMixedForConditionalGeneration
-        from .nvfp4__sm_103__default.modeling import ShortcutMixedForCausalLM
+            return ShortcutNvfp4ForConditionalGeneration
+        from .nvfp4__sm_103__default.modeling import ShortcutNvfp4ForCausalLM
 
-        return ShortcutMixedForCausalLM
+        return ShortcutNvfp4ForCausalLM
     raise NoTarget(f"Unsupported checkpoint precision: {quant}.")

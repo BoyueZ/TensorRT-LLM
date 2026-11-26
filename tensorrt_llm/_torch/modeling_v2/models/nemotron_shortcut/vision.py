@@ -15,8 +15,8 @@ from tensorrt_llm._torch.model_config import ModelConfig
 from tensorrt_llm.inputs.evs import compute_retention_mask
 from tensorrt_llm.inputs.multimodal import MultimodalParams
 
-from .decoder import _rms_norm
-from .manifest import _rows, load_unquantized
+from .decoder import rms_norm
+from .manifest import load_unquantized, row_window
 
 _VISION_PREFIX = "model.vision_tower."
 _PROJECTOR_PREFIX = "model.multi_modal_projector."
@@ -111,13 +111,13 @@ def _manifest(vision: "ShortcutVisionFrontend") -> dict:
         out[f"l{i}_attn_norm"] = [(p + "attention_norm.weight", None, None, None)]
         out[f"l{i}_ffn_norm"] = [(p + "ffn_norm.weight", None, None, None)]
         out[f"l{i}_qkv"] = [
-            (a + f"{name}_proj.weight", None, _rows(k * hd, hd), None)
+            (a + f"{name}_proj.weight", None, row_window(k * hd, hd), None)
             for k, name in enumerate(("q", "k", "v"))
         ]
         out[f"l{i}_o"] = [(a + "o_proj.weight", None, None, None)]
         out[f"l{i}_gate_up"] = [
-            (f + "gate_proj.weight", None, _rows(0, il), None),
-            (f + "up_proj.weight", None, _rows(il, il), None),
+            (f + "gate_proj.weight", None, row_window(0, il), None),
+            (f + "up_proj.weight", None, row_window(il, il), None),
         ]
         out[f"l{i}_down"] = [(f + "down_proj.weight", None, None, None)]
     return out
@@ -234,9 +234,9 @@ class ShortcutVisionFrontend(nn.Module):
 
     def _block(self, x, i, cosine, sine):
         prefix = f"l{i}_"
-        normalized = _rms_norm(x, self.w[prefix + "attn_norm"], _PIXTRAL_EPS)
+        normalized = rms_norm(x, self.w[prefix + "attn_norm"], _PIXTRAL_EPS)
         x = x + self._attention(normalized, prefix, cosine, sine)
-        normalized = _rms_norm(x, self.w[prefix + "ffn_norm"], _PIXTRAL_EPS)
+        normalized = rms_norm(x, self.w[prefix + "ffn_norm"], _PIXTRAL_EPS)
         gate, up = F.linear(normalized, self.w[prefix + "gate_up"]).chunk(2, dim=-1)
         return x + F.linear(F.silu(gate) * up, self.w[prefix + "down"])
 
@@ -259,13 +259,13 @@ class ShortcutVisionFrontend(nn.Module):
         raster = positions.argsort()
         cosine, sine = self.rotary_table[positions[raster]].to(patches.dtype).chunk(2, dim=-1)
         cosine, sine = torch.cat([cosine, cosine], -1), torch.cat([sine, sine], -1)
-        x = _rms_norm(self.patch_embeddings(patches, size), self.w["ln_pre"], _PIXTRAL_EPS)
+        x = rms_norm(self.patch_embeddings(patches, size), self.w["ln_pre"], _PIXTRAL_EPS)
         for i in range(self.num_layers):
             x = self._block(x, i, cosine, sine)
         return x[raster.argsort()]
 
     def project(self, features):
-        normalized = _rms_norm(features, self.w["proj_norm"], self.proj_eps)
+        normalized = rms_norm(features, self.w["proj_norm"], self.proj_eps)
         merged = normalized.reshape(len(features) // self.merge_size**2, -1)
         hidden = F.linear(merged, self.w["merge"])
         return F.linear(self.act(F.linear(hidden, self.w["proj_1"])), self.w["proj_2"])

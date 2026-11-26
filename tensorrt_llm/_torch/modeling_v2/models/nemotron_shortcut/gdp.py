@@ -121,7 +121,7 @@ def _prefill(q, k, v, log_decay, beta, pool, slots, resumed, bounds):
 def gdp_mixer(core, layer, x, md, layer_idx):
     if x.shape[0] == 0:
         return x.new_empty((0, core.gdp_v))
-    projection = core._mm(x, layer["gdp_in"])
+    projection = core.mm(x, layer["gdp_in"])
     gate, raw, beta, time = projection.split(
         (core.gdp_v, core.gdp_conv, core.m * core.gdp_heads, core.gdp_heads), dim=-1
     )

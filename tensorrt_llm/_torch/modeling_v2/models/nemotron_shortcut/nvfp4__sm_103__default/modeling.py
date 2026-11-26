@@ -5,12 +5,12 @@
 import torch
 
 from ..decoder import ShortcutDecoder, ShortcutForCausalLM
-from ..manifest import _manifest, excluded_prefixes
+from ..manifest import build_manifest, excluded_prefixes
 from .ops import grouped_experts
 from .weights import load, projection_parts
 
 
-class MixedDecoder(ShortcutDecoder):
+class Nvfp4Decoder(ShortcutDecoder):
     def __init__(self, model_config):
         self.recipe = model_config.quant_config_dict or {}
         self.quant_config = model_config.quant_config
@@ -31,7 +31,7 @@ class MixedDecoder(ShortcutDecoder):
 
     def _declare_matrix(self, weights, name, shape, P):
         if self.weight_manifest is None:
-            self.weight_manifest = _manifest(self)
+            self.weight_manifest = build_manifest(self)
         parts = projection_parts(
             name,
             shape,
@@ -76,6 +76,6 @@ class MixedDecoder(ShortcutDecoder):
     _grouped_experts = staticmethod(grouped_experts)
 
 
-class ShortcutMixedForCausalLM(ShortcutForCausalLM):
-    decoder_cls = MixedDecoder
+class ShortcutNvfp4ForCausalLM(ShortcutForCausalLM):
+    decoder_cls = Nvfp4Decoder
     weight_loader = staticmethod(load)

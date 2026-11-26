@@ -19,11 +19,11 @@ def _squeeze_conv(tensor):
     return tensor.squeeze(1)
 
 
-def _rows(start, width):
+def row_window(start, width):
     return (slice(start, start + width),)
 
 
-def _cols(start, width):
+def col_window(start, width):
     return (slice(None), slice(start, start + width))
 
 
@@ -46,7 +46,12 @@ def output_head_entry(core, head):
     if local_vocab * core.tp_size != core.w["embed"].shape[0]:
         raise ValueError("The vocabulary must divide evenly across the output projection ranks.")
     return [
-        ("lm_head.weight", _rows(core.slices["tp_rank"] * local_vocab, local_vocab), None, None)
+        (
+            "lm_head.weight",
+            row_window(core.slices["tp_rank"] * local_vocab, local_vocab),
+            None,
+            None,
+        )
     ]
 
 
@@ -69,7 +74,7 @@ def copy_checked(target, source, key):
 def dynamic_placements(core):
     return (
         (prefix, placement)
-        for prefix, placement in getattr(core, "expert_placements", {}).items()
+        for prefix, placement in core.expert_placements.items()
         if placement.layer_load_balancer.is_dynamic_routing()
     )
 
@@ -100,7 +105,7 @@ def load_unquantized(target, entries, weights):
         copy_checked(target if rows is None else target[rows], source, key)
 
 
-def _manifest(core):
+def build_manifest(core):
     """Map parameters to checkpoint keys, source windows, destination rows and transforms."""
     r = core.slices["tp_rank"]
     expert_rank = core.slices["moe_ep_rank"]
@@ -118,8 +123,8 @@ def _manifest(core):
         windows = []
         offset = 0
         for width in widths:
-            source = _rows(offset * tp + r * width, width)
-            windows.append((key, source, _rows(offset, width), transform))
+            source = row_window(offset * tp + r * width, width)
+            windows.append((key, source, row_window(offset, width), transform))
             offset += width
         return windows
 
@@ -138,17 +143,17 @@ def _manifest(core):
         kv_src = (r * core.heads_kv_global // tp) * hd
         return {
             f"{dst}qkv": [
-                (a + "q_proj.weight", _rows(r * q_w, q_w), _rows(0, q_w), None),
-                (a + "k_proj.weight", _rows(kv_src, kv_w), _rows(q_w, kv_w), None),
-                (a + "v_proj.weight", _rows(kv_src, kv_w), _rows(q_w + kv_w, kv_w), None),
+                (a + "q_proj.weight", row_window(r * q_w, q_w), row_window(0, q_w), None),
+                (a + "k_proj.weight", row_window(kv_src, kv_w), row_window(q_w, kv_w), None),
+                (a + "v_proj.weight", row_window(kv_src, kv_w), row_window(q_w + kv_w, kv_w), None),
             ],
-            f"{dst}o": [(a + "o_proj.weight", _cols(r * q_w, q_w), None, None)],
+            f"{dst}o": [(a + "o_proj.weight", col_window(r * q_w, q_w), None, None)],
             # The indexer's one query and one key head, replicated like the KV head.
             **(
                 {
                     f"{dst}idx": [
-                        (a + "indexer.q_proj.weight", None, _rows(0, di), None),
-                        (a + "indexer.k_proj.weight", None, _rows(di, di), None),
+                        (a + "indexer.q_proj.weight", None, row_window(0, di), None),
+                        (a + "indexer.k_proj.weight", None, row_window(di, di), None),
                     ]
                 }
                 if core.index_topk is not None
@@ -160,7 +165,7 @@ def _manifest(core):
         """The post-mixer norm (under block prefix `p`) and the MoE itself."""
         e = p + "moe."
         el, il, si = core.local_experts, core.expert_inter, core.shared_inter
-        placement = getattr(core, "expert_placements", {}).get(dst)
+        placement = core.expert_placements.get(dst)
         experts = (
             placement.initial_local_expert_ids
             if placement is not None
@@ -197,10 +202,10 @@ def _manifest(core):
                 )
             ],
             f"{dst}shared_up": [
-                (e + "shared_experts.up_proj.weight", _rows(r * si, si), None, None)
+                (e + "shared_experts.up_proj.weight", row_window(r * si, si), None, None)
             ],
             f"{dst}shared_down": [
-                (e + "shared_experts.down_proj.weight", _cols(r * si, si), None, None)
+                (e + "shared_experts.down_proj.weight", col_window(r * si, si), None, None)
             ],
         }
 
@@ -220,20 +225,20 @@ def _manifest(core):
             out[f"l{i}_gdp_conv"] = segment_windows(
                 g + "conv1d.weight", conv_sections, _squeeze_conv
             )
-            out[f"l{i}_gdp_a_log"] = [(g + "A_log", _rows(r * nh, nh), None, None)]
-            out[f"l{i}_gdp_dt_bias"] = [(g + "dt_bias", _rows(r * nh, nh), None, _fp32)]
-            out[f"l{i}_gdp_norm"] = [(g + "norm.weight", _rows(r * hv_l, hv_l), None, None)]
-            out[f"l{i}_gdp_out"] = [(g + "out_proj.weight", _cols(r * hv_l, hv_l), None, None)]
+            out[f"l{i}_gdp_a_log"] = [(g + "A_log", row_window(r * nh, nh), None, None)]
+            out[f"l{i}_gdp_dt_bias"] = [(g + "dt_bias", row_window(r * nh, nh), None, _fp32)]
+            out[f"l{i}_gdp_norm"] = [(g + "norm.weight", row_window(r * hv_l, hv_l), None, None)]
+            out[f"l{i}_gdp_out"] = [(g + "out_proj.weight", col_window(r * hv_l, hv_l), None, None)]
 
         if kind == "shortcut_moe_attn":
             out.update(attention(f"l{i}_", p + "self_attn."))
 
         if kind == "mlp":
             out[f"l{i}_up"] = [
-                (p + "mlp.up_proj.weight", _rows(r * core.inter, core.inter), None, None)
+                (p + "mlp.up_proj.weight", row_window(r * core.inter, core.inter), None, None)
             ]
             out[f"l{i}_down"] = [
-                (p + "mlp.down_proj.weight", _cols(r * core.inter, core.inter), None, None)
+                (p + "mlp.down_proj.weight", col_window(r * core.inter, core.inter), None, None)
             ]
 
         if kind in ("shortcut_moe_attn", "shortcut_moe_gdp"):

@@ -27,7 +27,16 @@ def test_mtp_two_draft_tokens_share_one_checkpoint_layer():
 
 
 def _route(
-    quant, world, moe_tp, *, state="auto", stochastic=False, capability=(10, 3), spec=None, **recipe
+    quant,
+    world,
+    moe_tp,
+    *,
+    state="auto",
+    stochastic=False,
+    capability=(10, 3),
+    spec=None,
+    settings=None,
+    **recipe,
 ):
     text = NemotronShortcutTextConfig(
         dtype=torch.bfloat16,
@@ -39,6 +48,7 @@ def _route(
         num_nextn_predict_layers=2,
         mtp_use_repeated_layer=True,
         moe_shortcut_disable_mtp=True,
+        **(settings or {}),
     )
     if spec is not None:
         update_spec_config_from_model_config(spec, text)
@@ -86,6 +96,11 @@ def test_rejects_unsupported_quantized_kv(quant, kv):
 def test_rejects_unqualified_mapping(quant, world):
     with pytest.raises(NoTarget, match="text decoder mapping"):
         _route(quant, world, 2)
+
+
+def test_rejects_unsupported_attention_head_size():
+    with pytest.raises(NoTarget, match="unsupported mixer, residual or expert settings"):
+        _route(None, 4, 2, settings={"head_dim": 96})
 
 
 def test_rejects_explicit_incompatible_mxfp8_scale_block():

@@ -148,7 +148,7 @@ def test_separate_attention_scales_and_padded_segmented_projection():
     from types import SimpleNamespace
 
     from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.nvfp4__sm_103__default.modeling import (
-        MixedDecoder,
+        Nvfp4Decoder,
     )
 
     device = torch.device("cuda")
@@ -183,7 +183,7 @@ def test_separate_attention_scales_and_padded_segmented_projection():
         want.append((xq[:, channel + i] * (a * b)).to(x.dtype))
     views = build("qkv", (3 * rows, cols), entries, recipe, checkpoint)
     torch.testing.assert_close(
-        MixedDecoder._project(x, views), torch.cat(want, dim=1), atol=0, rtol=0
+        Nvfp4Decoder._project(x, views), torch.cat(want, dim=1), atol=0, rtol=0
     )
 
     # A two-window row shard with 43 output features exercises zero-padding and
@@ -220,7 +220,7 @@ def test_separate_attention_scales_and_padded_segmented_projection():
     # An idle attention-DP rank still reaches the MoE collective with its
     # actual local width. None of the three projections should launch a GEMM.
     for projection, width in ((views[0], rows), (views, 3 * rows), (view, 43)):
-        got = MixedDecoder._project(x[:0], projection)
+        got = Nvfp4Decoder._project(x[:0], projection)
         assert got.shape == (0, width) and got.dtype == x.dtype and got.device == x.device
 
 
