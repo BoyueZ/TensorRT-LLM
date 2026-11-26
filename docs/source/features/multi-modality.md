@@ -107,9 +107,10 @@ after the `<nemo:img>` placeholder.
 The processor uses [OpenCV](#optional-dependencies) to resize images and video frames.
 
 For video, use the checkpoint's chat template with a video content item.
-The processor samples frames and adds their timestamps to the prompt.
-On GB300, all three weight formats were tested with
-`multimodal_config.video_pruning_rate` set to `0.0` and `0.5`.
+TensorRT-LLM samples video frames uniformly (by default, 2 FPS and up to 64 frames).
+The model adds timestamps from the source frame indices to the prompt. Set
+`multimodal_config.video_pruning_rate` to `0.0` to keep all visual tokens or
+`0.5` to prune half of them.
 
 ## Adding a Model
 
