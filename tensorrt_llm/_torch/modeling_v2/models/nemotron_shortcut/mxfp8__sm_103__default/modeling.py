@@ -4,8 +4,6 @@
 
 import torch
 
-from tensorrt_llm._torch.modeling_v2 import disable_v2_by_default
-
 from ..decoder import ShortcutDecoder, ShortcutForCausalLM
 from ..manifest import _manifest
 from ..moe import grouped_quantized_experts
@@ -62,7 +60,6 @@ class Mxfp8Decoder(ShortcutDecoder):
     _grouped_experts = staticmethod(grouped_quantized_experts)
 
 
-@disable_v2_by_default
 class ShortcutMxfp8ForCausalLM(ShortcutForCausalLM):
     decoder_cls = Mxfp8Decoder
     weight_loader = staticmethod(load)

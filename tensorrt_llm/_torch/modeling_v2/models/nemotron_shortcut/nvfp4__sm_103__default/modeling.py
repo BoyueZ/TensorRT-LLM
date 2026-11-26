@@ -4,8 +4,6 @@
 
 import torch
 
-from tensorrt_llm._torch.modeling_v2 import disable_v2_by_default
-
 from ..decoder import ShortcutDecoder, ShortcutForCausalLM
 from ..manifest import _manifest, excluded_prefixes
 from .ops import grouped_experts
@@ -78,7 +76,6 @@ class MixedDecoder(ShortcutDecoder):
     _grouped_experts = staticmethod(grouped_experts)
 
 
-@disable_v2_by_default
 class ShortcutMixedForCausalLM(ShortcutForCausalLM):
     decoder_cls = MixedDecoder
     weight_loader = staticmethod(load)
