@@ -133,10 +133,10 @@ def route(model_config, llm_args, compute_capability):
         if layout not in _FOUR_RANK_LAYOUTS:
             raise NoTarget(f"Unsupported BF16 text decoder mapping: {layout}.")
         if media:
-            from .bf16__sm_10x__default.multimodal import ShortcutBf16ForConditionalGeneration
+            from .bf16__sm_103__default.multimodal import ShortcutBf16ForConditionalGeneration
 
             return ShortcutBf16ForConditionalGeneration
-        from .bf16__sm_10x__default.modeling import ShortcutBf16ForCausalLM
+        from .bf16__sm_103__default.modeling import ShortcutBf16ForCausalLM
 
         return ShortcutBf16ForCausalLM
     if quant == QuantAlgo.MXFP8:
@@ -146,20 +146,20 @@ def route(model_config, llm_args, compute_capability):
         if layout not in _MIXED_LAYOUTS or mapping.world_size == 1:
             raise NoTarget(f"Unsupported MXFP8 text decoder mapping: {layout}.")
         if media:
-            from .mxfp8__sm_10x__default.multimodal import ShortcutMxfp8ForConditionalGeneration
+            from .mxfp8__sm_103__default.multimodal import ShortcutMxfp8ForConditionalGeneration
 
             return ShortcutMxfp8ForConditionalGeneration
-        from .mxfp8__sm_10x__default.modeling import ShortcutMxfp8ForCausalLM
+        from .mxfp8__sm_103__default.modeling import ShortcutMxfp8ForCausalLM
 
         return ShortcutMxfp8ForCausalLM
     if quant == QuantAlgo.MIXED_PRECISION:
         if layout not in _MIXED_LAYOUTS:
             raise NoTarget(f"Unsupported mixed-precision text decoder mapping: {layout}.")
         if media:
-            from .nvfp4__sm_10x__default.multimodal import ShortcutMixedForConditionalGeneration
+            from .nvfp4__sm_103__default.multimodal import ShortcutMixedForConditionalGeneration
 
             return ShortcutMixedForConditionalGeneration
-        from .nvfp4__sm_10x__default.modeling import ShortcutMixedForCausalLM
+        from .nvfp4__sm_103__default.modeling import ShortcutMixedForCausalLM
 
         return ShortcutMixedForCausalLM
     raise NoTarget(f"Unsupported checkpoint precision: {quant}.")

@@ -64,9 +64,9 @@ def _route(
 @pytest.mark.parametrize(
     "quant,kv,state,target",
     [
-        (None, None, "auto", "bf16__sm_10x__default"),
-        (QuantAlgo.MIXED_PRECISION, QuantAlgo.NVFP4, "float32", "nvfp4__sm_10x__default"),
-        (QuantAlgo.MXFP8, None, "auto", "mxfp8__sm_10x__default"),
+        (None, None, "auto", "bf16__sm_103__default"),
+        (QuantAlgo.MIXED_PRECISION, QuantAlgo.NVFP4, "float32", "nvfp4__sm_103__default"),
+        (QuantAlgo.MXFP8, None, "auto", "mxfp8__sm_103__default"),
     ],
 )
 def test_four_rank_mixed_expert_parallelism_uses_default(quant, kv, state, target):
