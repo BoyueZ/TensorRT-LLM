@@ -1020,17 +1020,28 @@ def test_auto_detect_exaone_moe(tmp_path: Path) -> None:
     assert isinstance(reasoning_parser, NemotronV3ReasoningParser)
 
 
-@pytest.mark.parametrize(
-    "model_type",
-    ["nemotron_h", "nemotron_h_puzzle", "nemotron_h_omni", "nemotron4"])
-def test_auto_detect_nemotron(tmp_path, model_type):
-    """Exact checkpoint model types resolve to the preferred nemotron-v3 parser."""
+@pytest.mark.parametrize("model_type",
+                         ["nemotron_h", "nemotron_h_puzzle", "nemotron_h_omni"])
+def test_auto_detect_nemotron_h(tmp_path, model_type):
+    """Nemotron-H models → 'nemotron-v3' parser (preferred over 'nano-v3').
+
+    `nemotron_h_omni` (Nemotron 3.5 Super VL) has a `model_type` that diverges
+    from its architecture string, and the lookup is exact-match, so without its
+    own row `--reasoning_parser auto` resolves to None.
+    """
     model_dir = str(tmp_path / model_type)
     os.makedirs(model_dir)
     _write_config(model_dir, model_type)
 
     result = resolve_auto_reasoning_parser(model_dir)
     assert result == "nemotron-v3"
+
+
+def test_auto_detect_nemotron_shortcut(tmp_path):
+    """The `nemotron4` model type has its own row for the same parser."""
+    _write_config(str(tmp_path), "nemotron4")
+
+    assert resolve_auto_reasoning_parser(str(tmp_path)) == "nemotron-v3"
 
 
 @pytest.mark.parametrize("name", ["nemotron-v3", "nano-v3", "k-exaone"])

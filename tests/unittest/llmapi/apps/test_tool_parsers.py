@@ -4772,20 +4772,43 @@ class TestPoolsideV1ToolParserFactory:
 
 
 # ============================================================================
-# Nemotron Tool Parser Tests
+# Nemotron 3.5 Super VL Parser Tests
 # ============================================================================
 
 
-class TestNemotronToolParserFactory:
-    """Resolve the Qwen3-Coder XML format from the checkpoint model_type."""
+class TestNemotron35SuperVLToolParserFactory:
+    """Nemotron 3.5 Super VL reuses `qwen3_coder`.
 
-    @pytest.mark.parametrize("model_type", ["nemotron_h_omni", "nemotron4"])
-    def test_auto_detect(self, tmp_path, model_type):
+    Its chat template instructs the model to emit that XML shape rather than
+    JSON, so it ships no parser of its own. The parser itself is covered by
+    `TestQwen3CoderToolParser`; only the mapping is new here.
+    """
+
+    def test_auto_detect_nemotron_h_omni(self, tmp_path):
+        """`model_type` diverges from the architecture string.
+
+        The checkpoint's architecture is `NemotronH_Omni_Reasoning_V3` but its
+        `model_type` is `nemotron_h_omni`, and the lookup is exact-match, so
+        without the mapping row `--tool_parser auto` resolved to None.
+        """
         from tensorrt_llm.serve.tool_parser.tool_parser_factory import \
             resolve_auto_tool_parser
+        model_dir = tmp_path / "NVIDIA-Nemotron-3.5-Super-120B-A12B"
+        model_dir.mkdir()
+        (model_dir / "config.json").write_text(
+            json.dumps({
+                "model_type": "nemotron_h_omni",
+                "architectures": ["NemotronH_Omni_Reasoning_V3"],
+            }))
 
+        assert resolve_auto_tool_parser(str(model_dir)) == "qwen3_coder"
+
+    def test_auto_detect_nemotron_shortcut(self, tmp_path):
+        """The `nemotron4` model type has its own row for the same parser."""
+        from tensorrt_llm.serve.tool_parser.tool_parser_factory import \
+            resolve_auto_tool_parser
         (tmp_path / "config.json").write_text(
-            json.dumps({"model_type": model_type}))
+            json.dumps({"model_type": "nemotron4"}))
 
         assert resolve_auto_tool_parser(str(tmp_path)) == "qwen3_coder"
 

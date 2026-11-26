@@ -1138,6 +1138,7 @@ moe_model_arch_list = [
     'Llama4ForConditionalGeneration',
     'NemotronHForCausalLM',
     'NemotronH_Omni_Reasoning_V3',
+    'NemotronShortcutForCausalLM',
     'Qwen2MoeForCausalLM',
     'Qwen3MoeForCausalLM',
     'Qwen3_5MoeForCausalLM',
@@ -1157,15 +1158,11 @@ moe_model_arch_list = [
 def maybe_create_moe_load_balancer(
     model_config, mapping: Optional[Mapping]
 ) -> AbstractContextManager[BaseMoeLoadBalancer | None]:
-    from tensorrt_llm._torch.pyexecutor.config_utils import is_nemotron_shortcut
-
     ep_rank = model_config.mapping.moe_ep_rank
     ep_size = model_config.mapping.moe_ep_size
     model_arch = model_config.pretrained_config.architectures[0]
     using_ep = mapping and mapping.moe_ep_size > 1
-    # Shortcut's media wrapper and text decoder use the same expert placement.
-    in_supported_model_arch = model_arch in moe_model_arch_list or is_nemotron_shortcut(
-        model_config.pretrained_config)
+    in_supported_model_arch = model_arch in moe_model_arch_list
     using_smart_router = mapping and mapping.moe_cluster_size > 1
     moe_load_balancer: AbstractContextManager[BaseMoeLoadBalancer
                                               | None] = nullcontext()

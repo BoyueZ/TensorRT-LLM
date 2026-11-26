@@ -47,8 +47,11 @@ MODEL_TYPE_TO_TOOL_PARSER: dict[str, str] = {
     "laguna": "poolside_v1",
     "minimax_m3_vl": "minimax_m3",
     "muse_spark": "musespark",
-    # Both Nemotron chat templates emit the Qwen3-Coder XML tool-call format.
+    # Nemotron 3.5 Super VL. Its chat template instructs the model to emit
+    # the Qwen3-Coder <tool_call><function=...><parameter=...> XML shape,
+    # not JSON, so it shares that parser.
     "nemotron_h_omni": "qwen3_coder",
+    # This chat template emits the same Qwen3-Coder XML shape.
     "nemotron4": "qwen3_coder",
 }
 

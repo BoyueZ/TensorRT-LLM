@@ -104,7 +104,8 @@ Please refer to the latest multimodal [support matrix](../models/supported-model
 BF16, MXFP8 and NVFP4 checkpoints with the single-frame video processor
 support image chat with the shipped template and raw image captioning. For a raw caption, place `A photo of` on the line immediately
 after the `<nemo:img>` placeholder.
-The processor uses [OpenCV](#optional-dependencies) to resize images and video frames.
+The processor uses [OpenCV](#optional-dependencies) to resize images and video frames,
+so image requests for this model need that package too.
 
 For video, use the checkpoint's chat template with a video content item.
 TensorRT-LLM samples video frames uniformly (by default, 2 FPS and up to 64 frames).
@@ -119,13 +120,13 @@ for processor metadata, payload selection, model hooks, and encoder/prefill hand
 
 ## Optional dependencies
 
-Video input decoding uses OpenCV (`cv2`) and is not installed by default. Install it for models with video inputs:
+Video input decoding uses OpenCV (`cv2`) and is not installed by default. Install it only for models with video inputs:
 
 ```bash
 pip install opencv-python-headless
 ```
 
-Text-only workflows do not require this package.
+Image-only and text-only workflows do not require this package.
 
 ## Examples
 
