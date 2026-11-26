@@ -12,8 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Serving extension for Nemotron checkpoints using required-tool grammars."""
+"""Guided output for Nemotron chat templates with a prefilled thinking marker."""
 
+from tensorrt_llm.checkpoint_format import NEMOTRON_SHORTCUT_MODEL_TYPE
 from tensorrt_llm.serve.serving_extensions import (
     RequiredToolChoiceMode,
     ServingExtension,
@@ -21,9 +22,22 @@ from tensorrt_llm.serve.serving_extensions import (
 )
 
 
-@register_serving_extension(model_types=("nemotron_h", "nemotron_h_omni"))
+@register_serving_extension(
+    model_types=("nemotron_h", "nemotron_h_omni", NEMOTRON_SHORTCUT_MODEL_TYPE),
+    reasoning_parsers=("nemotron-v3", "nano-v3"),
+)
 class NemotronServingExtension(ServingExtension):
-    """Use mandatory tool-call grammars for native Nemotron chat requests."""
-
     def required_tool_choice_mode(self) -> RequiredToolChoiceMode:
         return "grammar"
+
+    def structured_output_format(self, content: dict, chat_template_kwargs: dict | None):
+        # The template already emits <think> (enabled) or <think></think> (disabled).
+        if not (chat_template_kwargs or {}).get("enable_thinking", True):
+            return None
+        return {
+            "type": "sequence",
+            "elements": [
+                {"type": "tag", "begin": "", "content": {"type": "any_text"}, "end": "</think>"},
+                content,
+            ],
+        }

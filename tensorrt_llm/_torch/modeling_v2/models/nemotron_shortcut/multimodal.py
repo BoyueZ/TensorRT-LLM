@@ -59,9 +59,6 @@ class ShortcutMedia:
     def encode_multimodal_inputs(self, multimodal_params):
         return self.vision(multimodal_params)
 
-    def set_guided_decoder(self, guided_decoder):
-        return False
-
     def load_weights(self, weights, *args, **kwargs):
         super().load_weights(weights, *args, **kwargs)
         self.vision.load_weights(weights)
