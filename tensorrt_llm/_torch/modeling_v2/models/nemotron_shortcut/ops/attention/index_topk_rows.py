@@ -17,7 +17,8 @@ class IndexTopkRows(OpWrapper):
     """For every row `r`: score request `row_req[r]`'s cached index keys at positions
     `[0, row_len[r])` against `q[r]` (``index_scores``), keep the `topk` highest
     (ties prefer earlier logical positions), and write their K and V pool rows in
-    ascending logical order into ``out``. Short rows keep all causal keys and pad with -1.
+    ascending logical order into ``out``. Without an output pool-row buffer, return the
+    logical token indices. Short rows keep all causal keys and pad with -1.
     Caller-owned FP32 scores have a 16-byte-aligned row stride. Output and scratch
     buffers are supplied by the caller so generation can use CUDA graphs.
     """
@@ -57,7 +58,7 @@ class IndexTopkRows(OpWrapper):
         tile_rows: torch.Tensor,
         logits: torch.Tensor,
         indices: torch.Tensor,
-        out: torch.Tensor,
+        out: torch.Tensor | None,
         splits: int = 1,
         block_m: int = 16,
     ) -> torch.Tensor:
@@ -85,6 +86,8 @@ class IndexTopkRows(OpWrapper):
             deterministic=True,
             sorting="ascending",
         )
+        if out is None:
+            return indices[:n]
         return index_pool_rows(indices[:n], row_req, offsets, layer_in_pool, cache.shape[1], out)
 
     def reference(
@@ -107,13 +110,17 @@ class IndexTopkRows(OpWrapper):
         """Score the causal prefix and break cutoff ties by logical position."""
         n, topk = q.shape[0], indices.shape[1]
         tpb = cache.shape[1]
-        res = torch.full((1, n, 2, topk), -1, dtype=torch.int32, device=q.device)
+        shape = (n, topk) if out is None else (1, n, 2, topk)
+        res = torch.full(shape, -1, dtype=torch.int32, device=q.device)
         for r, (b, length) in enumerate(zip(row_req.tolist(), row_len.tolist())):
             pos = torch.arange(length, device=q.device)
             slots = offsets[b, 0, pos // tpb].long() // slot_scale
             scores = cache[slots, pos % tpb, 0].float() @ q[r].float()
             keep = pos if length <= topk else scores.argsort(descending=True, stable=True)[:topk]
             keep = keep.sort().values
+            if out is None:
+                res[r, : keep.numel()] = keep.int()
+                continue
             page, within = keep // tpb, keep % tpb
             for kv in range(2):
                 rows = (offsets[b, kv, page].long() + 2 * layer_in_pool) * tpb + within
@@ -145,7 +152,7 @@ class IndexTopkRows(OpWrapper):
             and topk % 4 == 0
             and row_len.dtype == torch.int32
             and row_len.numel() == n
-            and tuple(out.shape) == (1, n, 2, topk)
+            and (out is None or tuple(out.shape) == (1, n, 2, topk))
             and offsets.dim() == 3
             and slot_scale > 0
             and logits.shape[0] >= n

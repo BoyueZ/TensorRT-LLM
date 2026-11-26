@@ -23,7 +23,6 @@ def test_chunked_prefix_resume(model_root, precision, mtp, record_property):
         enable_chunked_prefill=True,
         speculative_config=MTPDecodingConfig(max_draft_len=2) if mtp else None,
         kv_cache_config=KvCacheConfig(
-            dtype="bfloat16",
             use_kv_cache_manager_v2=True,
             enable_block_reuse=True,
             mamba_state_config={"additional_snapshot_offsets_from_end": [1]},
@@ -72,7 +71,6 @@ def test_host_cache_round_trip(model_root, precision, record_property):
         enable_chunked_prefill=True,
         enable_iter_perf_stats=True,
         kv_cache_config=KvCacheConfig(
-            dtype="bfloat16",
             use_kv_cache_manager_v2=True,
             enable_block_reuse=True,
             max_tokens=2048,

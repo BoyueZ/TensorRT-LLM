@@ -22,9 +22,7 @@ class _ShortcutTextAccuracy(LlmapiAccuracyTestHarness):
             max_num_tokens=8192,
             max_batch_size=64,
             cuda_graph_config=CudaGraphConfig(enable_padding=True, max_batch_size=64),
-            kv_cache_config=KvCacheConfig(
-                dtype="bfloat16", use_kv_cache_manager_v2=True, enable_block_reuse=False
-            ),
+            kv_cache_config=KvCacheConfig(use_kv_cache_manager_v2=True, enable_block_reuse=False),
         ) as llm:
             GSM8K(self.MODEL_NAME).evaluate(
                 llm,

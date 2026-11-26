@@ -60,7 +60,6 @@ def test_expert_placement_preserves_generation(checkpoint, online):
         max_num_tokens=256,
         max_seq_len=256,
         kv_cache_config=KvCacheConfig(
-            dtype="bfloat16",
             use_kv_cache_manager_v2=True,
             enable_block_reuse=False,
         ),

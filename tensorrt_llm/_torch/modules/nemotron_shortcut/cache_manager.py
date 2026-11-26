@@ -15,6 +15,7 @@ from tensorrt_llm._torch.pyexecutor.kv_cache.mamba_cache_manager import MambaHyb
 from tensorrt_llm._torch.pyexecutor.kv_cache.mamba_cache_manager.common import (
     _get_local_mamba_cache_layout,
 )
+from tensorrt_llm._utils import get_size_in_bytes
 from tensorrt_llm.bindings import DataType
 from tensorrt_llm.runtime.kv_cache_manager_v2 import BufferConfig
 
@@ -43,7 +44,7 @@ def get_nemotron_shortcut_cache_params(config, *, spec_config=None, quant_config
 
 
 class NemotronShortcutCacheManager(MambaHybridCacheManagerV2):
-    """A BF16 K/V and index-K page per attention block and an independent slot per GDP block."""
+    """Paged attention K/V, BF16 index keys, and independent GDP state slots."""
 
     _supports_mixed_precision_kv = False
 
@@ -62,8 +63,8 @@ class NemotronShortcutCacheManager(MambaHybridCacheManagerV2):
 
     def __init__(self, *args, pretrained_config, dtype, **kwargs):
         config = getattr(pretrained_config, "text_config", None) or pretrained_config
-        if dtype != DataType.BF16:
-            raise ValueError("Nemotron Shortcut requires BF16 attention KV cache")
+        if dtype not in (DataType.BF16, DataType.NVFP4):
+            raise ValueError("Nemotron Shortcut supports BF16 and NVFP4 attention KV caches")
         self.index_key_dim = config.index_head_dim if config.index_topk is not None else 0
         super().__init__(
             *args,
@@ -88,8 +89,34 @@ class NemotronShortcutCacheManager(MambaHybridCacheManagerV2):
         tp = mamba_effective_tp_size(mapping)
         kv_heads = max(1, config.num_key_value_heads // tp)
         index_dim = config.index_head_dim if config.index_topk is not None else 0
-        elements_per_token = 2 * kv_heads * config.head_dim + index_dim
-        return layer_count * elements_per_token * torch.bfloat16.itemsize, 0, 0
+        kv_elements = 2 * kv_heads * config.head_dim
+        if model_config.quant_config and model_config.quant_config.quant_mode.has_fp4_kv_cache():
+            kv_bytes = get_size_in_bytes(kv_elements, DataType.NVFP4)
+            kv_bytes += cls.calculate_scaling_factor_size_bytes(kv_elements, 16, DataType.FP8)
+        else:
+            kv_bytes = get_size_in_bytes(kv_elements, DataType.BF16)
+        return layer_count * (kv_bytes + index_dim * torch.bfloat16.itemsize), 0, 0
+
+    def get_nvfp4_kv_buffers(self, layer_idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """Packed K/V data and block scales in HND order, indexed by lifecycle slot."""
+        if self.dtype != DataType.NVFP4:
+            raise ValueError("NVFP4 data and scale views require an NVFP4 KV cache")
+        local = self.layer_offsets[layer_idx]
+        heads = self.num_kv_heads_per_layer[local]
+        dim = self.head_dim_per_layer[local]
+        data = self._get_view_by_role_and_layer(
+            layer_idx,
+            (Role.KEY, Role.VALUE),
+            dtype=torch.uint8,
+            page_shape=[heads, self.tokens_per_block, dim // 2],
+        )
+        scales = self._get_view_by_role_and_layer(
+            layer_idx,
+            (Role.KEY_BLOCK_SCALE, Role.VALUE_BLOCK_SCALE),
+            dtype=torch.uint8,
+            page_shape=[heads, self.tokens_per_block, dim // 16],
+        )
+        return data, scales
 
     def _extra_buffers_per_layer(self, *, tokens_per_block):
         if not self.index_key_dim:

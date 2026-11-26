@@ -22,9 +22,7 @@ import pytest
 import torch
 
 from tensorrt_llm._torch.attention.backends.sparse.qsa.kernels import triton_qsa_paged_sparse_gqa
-from tensorrt_llm._torch.modeling_v2.models.qwen4_exp.ops.attention import (
-    qsa_paged_sparse_gqa_nvfp4 as _entry,
-)
+from tensorrt_llm._torch.modeling_v2.catalog.attention import qsa_paged_sparse_gqa_nvfp4 as _entry
 from tensorrt_llm._torch.modeling_v2.models.qwen4_exp.ops.attention.qsa_paged_sparse_gqa_nvfp4 import (  # noqa: E501
     qsa_paged_sparse_gqa_nvfp4 as op,
 )

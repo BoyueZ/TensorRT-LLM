@@ -6672,8 +6672,7 @@ class KvCacheConfig(StrictBaseModel, PybindMirror):
         description=
         "The data type for the KV cache. 'auto' (default) leaves the checkpoint's "
         "own KV-cache quantization metadata untouched (quant_config.kv_cache_quant_algo "
-        "is inherited as-is). 'bfloat16' requests unquantized pages for BF16 models. "
-        "'fp8', 'fp8_ds_mla', or 'nvfp4' select a quantized cache. "
+        "is inherited as-is); 'fp8', 'fp8_ds_mla', or 'nvfp4' override it explicitly. "
         "'fp8_ds_mla' selects the packed FP8 cache used by sparse MLA on SM90/SM120/SM121. "
         "'mixed_nvfp4_<dtype>' (prototype) stores the full KV history in NVFP4 and "
         "keeps the first and last N tokens of every sequence in <dtype> "
@@ -10360,9 +10359,9 @@ class TorchLlmArgs(BaseLlmArgs):
             self.quant_config.kv_cache_quant_algo = QuantAlgo.FP8
         elif self.kv_cache_config.dtype == 'nvfp4':
             self.quant_config.kv_cache_quant_algo = QuantAlgo.NVFP4
-        elif self.kv_cache_config.dtype in ('bfloat16', 'mixed_nvfp4_float16',
+        elif self.kv_cache_config.dtype in ('mixed_nvfp4_float16',
                                             'mixed_nvfp4_bfloat16'):
-            # Unquantized pages use the model dtype.
+            # The first/last tokens stay in the model dtype: no KV quantization.
             self.quant_config.kv_cache_quant_algo = None
         else:
             logger.warning(

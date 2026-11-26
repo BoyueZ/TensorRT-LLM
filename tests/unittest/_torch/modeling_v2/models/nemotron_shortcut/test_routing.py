@@ -32,6 +32,7 @@ def _route(
     text = NemotronShortcutTextConfig(
         dtype=torch.bfloat16,
         num_attention_heads=8,
+        index_topk=2048,
         residual_in_fp32=True,
         moe_router_bias_space="logit",
         gdp_g_clamp_value=20.0,
@@ -47,17 +48,12 @@ def _route(
         mapping=Mapping(
             world_size=world, tp_size=world, moe_tp_size=moe_tp, moe_ep_size=world // moe_tp
         ),
-        quant_config=QuantConfig(
-            quant_algo=quant,
-            kv_cache_quant_algo=QuantAlgo.NVFP4 if quant is not None else None,
-            **recipe,
-        ),
+        quant_config=QuantConfig(quant_algo=quant, **recipe),
     )
     args = TorchLlmArgs(
         model="/tmp/dummy_model",
         modeling_v2="require",
         kv_cache_config=KvCacheConfig(
-            dtype="bfloat16",
             mamba_ssm_cache_dtype=state,
             mamba_ssm_stochastic_rounding=stochastic,
         ),
@@ -66,15 +62,24 @@ def _route(
 
 
 @pytest.mark.parametrize(
-    "quant,state,target",
+    "quant,kv,state,target",
     [
-        (None, "auto", "bf16__sm_10x__default"),
-        (QuantAlgo.MIXED_PRECISION, "float32", "nvfp4__sm_10x__default"),
-        (QuantAlgo.MXFP8, "auto", "mxfp8__sm_10x__default"),
+        (None, None, "auto", "bf16__sm_10x__default"),
+        (QuantAlgo.MIXED_PRECISION, QuantAlgo.NVFP4, "float32", "nvfp4__sm_10x__default"),
+        (QuantAlgo.MXFP8, None, "auto", "mxfp8__sm_10x__default"),
     ],
 )
-def test_four_rank_mixed_expert_parallelism_uses_default(quant, state, target):
-    assert _route(quant, 4, 2, state=state).__module__.split(".")[-2] == target
+def test_four_rank_mixed_expert_parallelism_uses_default(quant, kv, state, target):
+    cls = _route(quant, 4, 2, state=state, kv_cache_quant_algo=kv)
+    assert cls.__module__.split(".")[-2] == target
+
+
+@pytest.mark.parametrize(
+    "quant,kv", [(QuantAlgo.MIXED_PRECISION, QuantAlgo.FP8), (None, QuantAlgo.NVFP4)]
+)
+def test_rejects_unsupported_quantized_kv(quant, kv):
+    with pytest.raises(NoTarget, match="Quantized KV"):
+        _route(quant, 4, 2, kv_cache_quant_algo=kv)
 
 
 @pytest.mark.parametrize("quant,world", [(None, 2), (QuantAlgo.MIXED_PRECISION, 8)])

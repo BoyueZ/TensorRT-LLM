@@ -98,7 +98,6 @@ def test_evs_conditioned_video(model_root, precision, rate, record_property):
         cuda_graph_config=None,
         enable_chunked_prefill=False,
         kv_cache_config={
-            "dtype": "bfloat16",
             "use_kv_cache_manager_v2": True,
             "enable_block_reuse": False,
         },

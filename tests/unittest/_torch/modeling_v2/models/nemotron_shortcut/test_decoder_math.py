@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -130,3 +131,106 @@ def test_sparse_selection_preserves_logical_order_at_cutoff():
         expected[0, -1] = width - 1
         expected[1, :5] = torch.arange(5, dtype=torch.int32)
         torch.testing.assert_close(indices, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 3),
+    reason="requires SM103 NVFP4 paged attention",
+)
+def test_native_nvfp4_kv_continuation_across_pages():
+    from tensorrt_llm._torch.modeling_v2.catalog.attention.qsa_paged_kv_store_nvfp4 import (
+        qsa_paged_kv_store_nvfp4,
+    )
+    from tensorrt_llm._torch.modeling_v2.catalog.attention.qsa_paged_sparse_gqa_nvfp4 import (
+        qsa_paged_sparse_gqa_nvfp4,
+    )
+    from tensorrt_llm._torch.modeling_v2.models.nemotron_shortcut.indexer import IndexPlan
+
+    page_size, head_dim, query_heads = 32, 256, 8
+    topk, batch = 2048, 16
+    with torch.device("cuda"):
+        table = torch.tensor([[1, 0]], dtype=torch.int32)
+        slot_scale = 24
+        offsets = torch.stack([table * slot_scale, table * slot_scale + 1], dim=1)
+        generator = torch.Generator(device="cuda").manual_seed(5)
+        slots = topk // page_size + batch - 1
+        data = torch.randint(
+            256, (slots, 2, 1, page_size, head_dim // 2), dtype=torch.uint8, generator=generator
+        )
+        scales = torch.randint(
+            0x28,
+            0x3B,
+            (slots, 2, 1, page_size, head_dim // 16),
+            dtype=torch.uint8,
+            generator=generator,
+        )
+        planes = (data[:, 0], data[:, 1], scales[:, 0], scales[:, 1])
+        layout = SimpleNamespace(nvfp4_planes={5: planes}, slot_scale=slot_scale)
+        calibration = torch.tensor([1.0, 0.25, 0.5])
+        for start, count in ((0, page_size), (page_size, 2)):
+            positions = torch.arange(start, start + count, dtype=torch.int32)
+            req = torch.zeros_like(positions)
+            plan = IndexPlan(layout, offsets, req, positions, count if not start else 0, 64, [])
+            qkv = torch.randn(
+                count, query_heads + 2, head_dim, dtype=torch.bfloat16, generator=generator
+            )
+            q, k, v = qkv.split((query_heads, 1, 1), dim=1)
+            packed = qsa_paged_kv_store_nvfp4.reference(
+                k,
+                v,
+                *planes,
+                req,
+                positions,
+                table,
+                page_size,
+                calibration.reciprocal(),
+            )
+            keys = torch.arange(64, dtype=torch.int32)
+            selected = torch.where(keys <= positions[:, None], keys, -1)
+            expected = qsa_paged_sparse_gqa_nvfp4.reference(
+                q,
+                *packed,
+                calibration,
+                table,
+                selected,
+                req,
+                page_size,
+                head_dim**-0.5,
+            )
+            actual = plan.attend_nvfp4(
+                5, qkv.flatten(1), None, calibration, calibration.reciprocal()
+            )
+            for cached, reference in zip(planes, packed):
+                torch.testing.assert_close(cached, reference, rtol=0, atol=0)
+            # The sparse kernel rounds probabilities before multiplying V.
+            torch.testing.assert_close(actual, expected.flatten(1), rtol=0.015625, atol=0.015625)
+
+        # The requests share a full prefix and own distinct tail pages. A query
+        # must keep the same reduction order when other generation rows join it.
+        pages = torch.arange(topk // page_size, dtype=torch.int32).repeat(batch, 1)
+        pages[:, -1] += torch.arange(batch, dtype=torch.int32)
+        positions = topk - batch + torch.arange(batch, dtype=torch.int32)
+        qkv = torch.randn(
+            batch, (query_heads + 2) * head_dim, dtype=torch.bfloat16, generator=generator
+        )
+        results = []
+        for request_slice in (slice(7, 8), slice(None)):
+            table = pages[request_slice]
+            offsets = torch.stack([table * slot_scale, table * slot_scale + 1], dim=1)
+            requests = torch.arange(len(table), dtype=torch.int32)
+            plan = IndexPlan(
+                layout,
+                offsets,
+                requests,
+                positions[request_slice],
+                0,
+                topk,
+                [],
+                batch_invariant=True,
+            )
+            results.append(
+                plan.attend_nvfp4(
+                    5, qkv[request_slice], None, calibration, calibration.reciprocal()
+                )
+            )
+        torch.testing.assert_close(results[0][0], results[1][7], rtol=0, atol=0)

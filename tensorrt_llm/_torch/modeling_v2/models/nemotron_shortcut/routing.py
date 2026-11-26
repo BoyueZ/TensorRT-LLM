@@ -63,8 +63,14 @@ def route(model_config, llm_args, compute_capability):
             raise NoTarget("The repeated prediction layer requires token IDs in every draft row.")
     if model_config.torch_dtype != torch.bfloat16:
         raise NoTarget("The text decoder requires BF16 activations.")
-    if engine_kv_cache_quant_algo(model_config, llm_args) is not None:
-        raise NoTarget("The text decoder requires BF16 KV pages.")
+    quant = model_config.quant_config.quant_algo
+    kv_quant = engine_kv_cache_quant_algo(model_config, llm_args)
+    if kv_quant is not None and (
+        kv_quant != QuantAlgo.NVFP4 or quant != QuantAlgo.MIXED_PRECISION or cfg.index_topk is None
+    ):
+        raise NoTarget(
+            "Quantized KV requires the Super NVFP4 checkpoint with NVSA and NVFP4 pages."
+        )
     cache = llm_args.kv_cache_config
     if (
         effective_mamba_ssm_cache_dtype(model_config, cache.mamba_ssm_cache_dtype) != torch.float32
@@ -123,7 +129,6 @@ def route(model_config, llm_args, compute_capability):
         mapping.moe_ep_size,
     )
     media = bool(getattr(cfg, "media_config", None)) and not llm_args.disable_mm_encoder
-    quant = model_config.quant_config.quant_algo
     if quant is None:
         if layout not in _FOUR_RANK_LAYOUTS:
             raise NoTarget(f"Unsupported BF16 text decoder mapping: {layout}.")

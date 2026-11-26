@@ -28,7 +28,9 @@ class DraftLayer:
         weights = core.mtp
         if hidden_states.shape[0] == 0:
             if core.attn_dp and any(all_rank_num_tokens):
-                core._moe(weights, hidden_states, hidden_states, all_rank_num_tokens)
+                core._moe(
+                    weights, hidden_states, hidden_states, all_rank_num_tokens, core._allreduce
+                )
             return hidden_states
 
         embedding = F.embedding(input_ids.long(), embed_tokens)
@@ -50,11 +52,18 @@ class DraftLayer:
         step = attention_step_args(md, decode=md.num_contexts == 0, n_rows=x.shape[0])
         plan = core.index.plan(md, x.shape[0]) if core.index is not None else None
         x = x + core._attention(
-            local_layer, weights, _rms_norm(x, weights["norm_in"], core.eps), step, md, plan, layer
+            local_layer,
+            weights,
+            _rms_norm(x, weights["norm_in"], core.eps),
+            step,
+            md,
+            core._allreduce,
+            plan,
+            layer,
         )
         # Both expert paths consume the post-attention state of this ordinary residual block.
         moe_input = _rms_norm(x, weights["pre_moe_norm"], core.eps)
-        x = x + core._moe(weights, moe_input, moe_input, all_rank_num_tokens)
+        x = x + core._moe(weights, moe_input, moe_input, all_rank_num_tokens, core._allreduce)
         return _rms_norm(x, weights["final_norm"], core.eps)
 
 

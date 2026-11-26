@@ -68,9 +68,7 @@ def test_multi_adapter_generation(checkpoint, tmp_path):
         max_num_tokens=128,
         max_seq_len=128,
         lora_config=LoraConfig(lora_dir=[a.path], max_lora_rank=8, max_loras=2, max_cpu_loras=2),
-        kv_cache_config=KvCacheConfig(
-            dtype="bfloat16", use_kv_cache_manager_v2=True, enable_block_reuse=False
-        ),
+        kv_cache_config=KvCacheConfig(use_kv_cache_manager_v2=True, enable_block_reuse=False),
     )
     prompt = "The capital of France is"
     sampling = SamplingParams(

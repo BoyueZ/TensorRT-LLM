@@ -28,9 +28,7 @@ def test_deterministic_batch_invariance(model_root, precision, record_property):
         enable_chunked_prefill=False,
         enable_iter_perf_stats=True,
         cuda_graph_config=CudaGraphConfig(enable_padding=True, max_batch_size=16),
-        kv_cache_config=KvCacheConfig(
-            dtype="bfloat16", use_kv_cache_manager_v2=True, enable_block_reuse=False
-        ),
+        kv_cache_config=KvCacheConfig(use_kv_cache_manager_v2=True, enable_block_reuse=False),
     ) as llm:
         sampling = SamplingParams(
             temperature=0, top_k=1, max_tokens=32, min_tokens=32, ignore_eos=True, detokenize=False

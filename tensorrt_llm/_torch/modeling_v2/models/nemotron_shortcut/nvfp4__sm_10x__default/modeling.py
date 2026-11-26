@@ -16,6 +16,7 @@ class MixedDecoder(ShortcutDecoder):
     def __init__(self, model_config):
         self.recipe = model_config.quant_config_dict or {}
         self.quant_config = model_config.quant_config
+        self.nvfp4_kv = self.quant_config.quant_mode.has_fp4_kv_cache()
         self.projections = {}
         self.weight_manifest = None
         super().__init__(model_config)
@@ -52,6 +53,19 @@ class MixedDecoder(ShortcutDecoder):
             return super()._matrix_view(name)
         parts = [part.view(self.w) for part in self.projections[name]]
         return parts[0] if len(parts) == 1 else parts
+
+    def _declare_attention(self, w, prefix, P):
+        super()._declare_attention(w, prefix, P)
+        if self.nvfp4_kv:
+            w[prefix + "kv_scales"] = P(3, dtype=torch.float32)
+            w[prefix + "inv_kv_scales"] = P(3, dtype=torch.float32)
+
+    def _attention_views(self, prefix):
+        views = super()._attention_views(prefix)
+        if self.nvfp4_kv:
+            views["kv_scales"] = self.w[prefix + "kv_scales"]
+            views["inv_kv_scales"] = self.w[prefix + "inv_kv_scales"]
+        return views
 
     @staticmethod
     def _project(x, weight, *, out_dtype=None):

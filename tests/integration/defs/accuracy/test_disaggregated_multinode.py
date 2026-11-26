@@ -446,7 +446,6 @@ def _check_shortcut_handoff(record_property, precision: str, *, use_mtp: bool) -
         "enable_chunked_prefill": False,
         "cuda_graph_config": None,
         "kv_cache_config": {
-            "dtype": "bfloat16",
             "use_kv_cache_manager_v2": True,
             "enable_block_reuse": False,
             "free_gpu_memory_fraction": 0.5,

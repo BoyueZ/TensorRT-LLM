@@ -1122,6 +1122,60 @@ class MambaHybridCacheManagerV2(KVCacheManagerV2, MambaHybridCacheManager):
 
         self._setup_model_state()
 
+    def _get_view_by_role_and_layer(
+        self,
+        layer_idx: int,
+        roles: tuple[DataRole, ...],
+        *,
+        dtype: torch.dtype,
+        page_shape: list[int],
+    ) -> torch.Tensor:
+        """Return a zero-copy strided view of one layer's selected roles across the pool.
+
+        The view has shape [slots, roles, *page_shape] and preserves the physical
+        slot stride when layers or roles share a pool. Selected roles must be
+        adjacent and equal-sized; expanded page mappings are unsupported.
+        """
+        if not roles:
+            raise ValueError("A slot view requires at least one role")
+        layer_offset = self.layer_offsets[layer_idx]
+        first_role = roles[0]
+        address = self.impl.get_mem_pool_base_address(
+            layer_offset, first_role, PageIndexMode.SHARED
+        )
+        page_stride = self.impl.get_page_stride(layer_offset, first_role)
+        expected_stride = math.prod(page_shape) * dtype.itemsize
+        if page_stride != expected_stride:
+            raise RuntimeError(
+                f"Slot-view page stride mismatch: expected {expected_stride}, got {page_stride}"
+            )
+        for offset, role in enumerate(roles[1:], start=1):
+            role_address = self.impl.get_mem_pool_base_address(
+                layer_offset, role, PageIndexMode.SHARED
+            )
+            if (
+                role_address != address + offset * page_stride
+                or self.impl.get_page_stride(layer_offset, role) != page_stride
+            ):
+                raise RuntimeError(f"Slot-view roles are not adjacent equal-sized pages: {roles}")
+
+        converter = self.impl.get_page_index_converter(layer_offset, first_role)
+        scale = int(converter.scale)
+        if scale < len(roles):
+            raise RuntimeError(
+                f"Invalid slot-view page-index scale: {scale} for {len(roles)} roles"
+            )
+        if int(converter.expansion) != 1:
+            raise RuntimeError("Slot views do not support expanded page indices")
+        page_upper = self.impl.get_page_index_upper_bound(layer_offset, first_role)
+        num_pages_with_offset = page_upper + int(converter.layer_offset)
+        if num_pages_with_offset % scale != 0:
+            raise RuntimeError("Slot-view page mapping is inconsistent")
+        view = convert_to_torch_tensor(
+            TensorWrapper(address, dtype, [num_pages_with_offset // scale, scale, *page_shape])
+        )
+        return view[:, : len(roles)]
+
     def _get_state_buffer(
         self, local_layer_idx: int, role, dtype: torch.dtype, state_shape: List[int]
     ) -> torch.Tensor:

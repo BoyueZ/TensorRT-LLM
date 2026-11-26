@@ -43,7 +43,6 @@ def server(request):
         "max_batch_size": 4,
         "disable_overlap_scheduler": False,
         "kv_cache_config": {
-            "dtype": "bfloat16",
             "use_kv_cache_manager_v2": True,
             "enable_block_reuse": False,
         },

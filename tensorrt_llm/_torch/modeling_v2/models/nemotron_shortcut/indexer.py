@@ -10,6 +10,12 @@ from dataclasses import dataclass
 import torch
 import triton
 
+from tensorrt_llm._torch.modeling_v2.catalog.attention.qsa_paged_kv_store_nvfp4 import (
+    qsa_paged_kv_store_nvfp4,
+)
+from tensorrt_llm._torch.modeling_v2.catalog.attention.qsa_paged_sparse_gqa_nvfp4 import (
+    qsa_paged_sparse_gqa_nvfp4,
+)
 from tensorrt_llm._torch.modeling_v2.catalog.attention.thop_attention import thop_attention
 from tensorrt_llm._utils import maybe_pin_memory
 
@@ -28,9 +34,10 @@ _DECODE_SCORE_BYTES = 1 << 30
 class _Layout:
     """The physical index-key views and K/V page addressing for one cache manager."""
 
-    def __init__(self, manager, md, layers: list[int], index_dim: int):
+    def __init__(self, manager, md, layers: list[int], index_dim: int, nvfp4_kv: bool):
         self.manager = weakref.ref(manager)
         self.views = {}
+        self.nvfp4_planes = {}
         self.layer_in_pool = {}
         pools = set()
         for layer in layers:
@@ -40,6 +47,9 @@ class _Layout:
             if view is None:
                 raise ValueError(f"Attention layer {layer} has no registered index-key buffer")
             self.views[layer] = view
+            if nvfp4_kv:
+                data, scales = manager.get_nvfp4_kv_buffers(layer)
+                self.nvfp4_planes[layer] = (data[:, 0], data[:, 1], scales[:, 0], scales[:, 1])
             row = manager.layer_offsets[layer]
             pool, offset = md.host_kv_cache_pool_mapping[row].tolist()
             pools.add(pool)
@@ -64,7 +74,7 @@ class _Pass:
 @dataclass
 class _DecodeBuffers:
     indices: torch.Tensor
-    pool_rows: torch.Tensor
+    pool_rows: torch.Tensor | None
     logits: torch.Tensor
 
 
@@ -83,6 +93,7 @@ class IndexPlan:
         buffers: _DecodeBuffers | None = None,
         *,
         verify_width: int = 1,
+        batch_invariant: bool = False,
     ):
         self.layout = layout
         self.offsets = offsets
@@ -93,10 +104,11 @@ class IndexPlan:
         self.topk = topk
         self.passes = passes
         self.buffers = buffers
+        self.batch_invariant = batch_invariant
         self.causal_indices = None
-        if verify_width > 1 and not passes:
-            # Every key fits. Give each MTP candidate its own causal prefix
-            # even when the history is too short to require score selection.
+        self.block_table = offsets[:, 0] // layout.slot_scale if layout.nvfp4_planes else None
+        if (verify_width > 1 or self.block_table is not None) and not passes:
+            # Every key fits. Each query attends to its own causal prefix.
             cols = torch.arange(topk, dtype=torch.int32, device=positions.device)
             self.causal_indices = torch.where(cols < self.lengths[:, None], cols, -1)
         self.sparse = bool(passes) or self.causal_indices is not None
@@ -113,8 +125,11 @@ class IndexPlan:
         )
 
     def select(self, layer: int, q: torch.Tensor) -> torch.Tensor:
-        """Return the selected K and V pool rows shaped [1, tokens, 2, topk]."""
+        """Return causal logical token indices or their physical K and V pool rows."""
+        logical = self.block_table is not None
         if self.causal_indices is not None:
+            if logical:
+                return self.causal_indices
             return index_pool_rows(
                 self.causal_indices,
                 self.requests,
@@ -123,11 +138,14 @@ class IndexPlan:
                 self.layout.views[layer].shape[1],
             )
         n = q.shape[0]
+        out = None
         if self.buffers is None:
-            out = torch.empty(1, n, 2, self.topk, dtype=torch.int32, device=q.device)
+            if not logical:
+                out = torch.empty(1, n, 2, self.topk, dtype=torch.int32, device=q.device)
             indices = torch.empty(n, self.topk, dtype=torch.int32, device=q.device)
         else:
-            out = self.buffers.pool_rows[:, :n]
+            if not logical:
+                out = self.buffers.pool_rows[:, :n]
             indices = self.buffers.indices[:n]
         for work in self.passes:
             rows = slice(work.start, work.end)
@@ -152,11 +170,47 @@ class IndexPlan:
                 work.tile_sizes,
                 logits,
                 indices[rows],
-                out[:, rows],
+                None if out is None else out[:, rows],
                 work.splits,
                 work.tile_rows,
             )
-        return out
+        return indices[:n] if out is None else out
+
+    def attend_nvfp4(self, layer, qkv, index_q, kv_scales, inv_kv_scales):
+        """Append K/V to their packed pages and attend to the selected tokens in those pages."""
+        k_data, v_data, k_scales, v_scales = self.layout.nvfp4_planes[layer]
+        _, kv_heads, page_size, packed_dim = k_data.shape
+        head_dim = packed_dim * 2
+        heads = qkv.view(qkv.shape[0], -1, head_dim)
+        q, k, v = heads.split((heads.shape[1] - 2 * kv_heads, kv_heads, kv_heads), dim=1)
+        qsa_paged_kv_store_nvfp4(
+            k,
+            v,
+            k_data,
+            v_data,
+            k_scales,
+            v_scales,
+            self.requests,
+            self.positions,
+            self.block_table,
+            page_size,
+            inv_kv_scales,
+        )
+        selected = self.select(layer, index_q)
+        return qsa_paged_sparse_gqa_nvfp4(
+            q,
+            k_data,
+            v_data,
+            k_scales,
+            v_scales,
+            kv_scales,
+            self.block_table,
+            selected,
+            self.requests,
+            page_size,
+            head_dim**-0.5,
+            batch_invariant=self.batch_invariant,
+        ).flatten(1)
 
     def attend(self, qkv: torch.Tensor, out: torch.Tensor, rows: torch.Tensor, args: dict) -> None:
         """Run the context and generation portions using their own token-sparse dispatcher."""
@@ -193,6 +247,7 @@ class IndexState:
         *,
         index_dim: int,
         batch_invariant: bool = False,
+        nvfp4_kv: bool = False,
     ):
         if topk <= 0 or topk % 4:
             raise ValueError("Token-sparse attention requires a positive top-k divisible by four")
@@ -201,6 +256,7 @@ class IndexState:
         self.index_dim = index_dim
         self.num_sms = num_sms
         self.batch_invariant = batch_invariant
+        self.nvfp4_kv = nvfp4_kv
         self._layout: _Layout | None = None
         self._rows: torch.Tensor | None = None
         self._buffers: _DecodeBuffers | None = None
@@ -223,7 +279,9 @@ class IndexState:
         warmup_prefill(self.topk, width, deterministic=True)
         self._buffers = _DecodeBuffers(
             torch.empty(rows, self.topk, dtype=torch.int32, device=device),
-            torch.empty(1, rows, 2, self.topk, dtype=torch.int32, device=device),
+            None
+            if self.nvfp4_kv
+            else torch.empty(1, rows, 2, self.topk, dtype=torch.int32, device=device),
             torch.empty(score_rows, triton.cdiv(width, 4) * 4, dtype=torch.float32, device=device)[
                 :, :width
             ],
@@ -232,7 +290,7 @@ class IndexState:
     def _cache_layout(self, md) -> _Layout:
         manager = md.kv_cache_manager
         if self._layout is None or self._layout.manager() is not manager:
-            self._layout = _Layout(manager, md, self.layers, self.index_dim)
+            self._layout = _Layout(manager, md, self.layers, self.index_dim, self.nvfp4_kv)
         return self._layout
 
     def _prefill_passes(self, seq_lens: list[int], width: int, device: torch.device) -> list[_Pass]:
@@ -296,6 +354,7 @@ class IndexState:
             verify_width=generation_width(
                 n_rows - md.num_ctx_tokens, md.num_seqs - md.num_contexts
             ),
+            batch_invariant=self.batch_invariant,
         )
 
     def plan(self, md, n_rows: int) -> IndexPlan:
@@ -350,4 +409,5 @@ class IndexState:
             passes,
             buffers,
             verify_width=width_per_request,
+            batch_invariant=self.batch_invariant,
         )

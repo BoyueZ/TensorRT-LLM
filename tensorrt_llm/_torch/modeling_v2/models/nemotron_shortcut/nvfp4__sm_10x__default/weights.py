@@ -204,11 +204,37 @@ def _bind_expert_banks(core, weights):
         placement.bind_weights(core.w, prefix, host)
 
 
+def _kv_scale_keys(entries, weights, *, required):
+    # Cache calibration can be present even when the K/V projection weights are excluded.
+    pair = tuple(
+        entry[0].removesuffix(".weight") + f".{axis}_scale"
+        for entry, axis in zip(entries[1:], ("k", "v"), strict=True)
+    )
+    if not required and not any(key in weights for key in pair):
+        return ()
+    for key in pair:
+        if key not in weights:
+            raise ValueError(f"Missing KV calibration: {key}")
+    return pair
+
+
+def _load_kv_scales(scales, inverse, keys, weights):
+    scales.fill_(1)
+    for i, key in enumerate(keys, start=1):
+        copy_checked(scales[i], weights[key][...].reshape(()), key)
+    torch.reciprocal(scales, out=inverse)
+
+
 def _check_keys(core, weights):
     # The checkpoint dictionary describes every rank. Validate the full set of
     # expert keys without ever opening an off-rank expert.
     keys = {"lm_head." + k for k in ("weight", "weight_scale", "input_scale")}
+    kv_scale_keys = {}
     for name, entries in core.weight_manifest.items():
+        if name.endswith("_qkv"):
+            required = name in core.projections or (core.nvfp4_kv and name != "mtp_qkv")
+            kv_scale_keys[name] = _kv_scale_keys(entries, weights, required=required)
+            keys.update(kv_scale_keys[name])
         if name not in core.projections:
             keys.update(key for key, *_ in entries)
             continue
@@ -217,19 +243,23 @@ def _check_keys(core, weights):
             for expert in experts:
                 module = part.module(expert)
                 keys.update(module + "." + suffix for suffix in part.suffixes)
-            # BF16 KV bypasses the published cache-only scales.
-            if part.source.endswith(".self_attn.k_proj.weight"):
-                keys.add(part.module() + ".k_scale")
-            if part.source.endswith(".self_attn.v_proj.weight"):
-                keys.add(part.module() + ".v_scale")
     check_checkpoint_keys(weights, keys, mtp_enabled=core.mtp_enabled)
+    return kv_scale_keys
 
 
 @torch.no_grad()
 def load(model, weights):
     core = model.model
-    _check_keys(core, weights)
+    kv_scale_keys = _check_keys(core, weights)
     for name, entries in core.weight_manifest.items():
+        if core.nvfp4_kv and name in kv_scale_keys:
+            prefix = name.removesuffix("qkv")
+            _load_kv_scales(
+                core.w[prefix + "kv_scales"],
+                core.w[prefix + "inv_kv_scales"],
+                kv_scale_keys[name],
+                weights,
+            )
         if name in core.projections:
             for part in core.projections[name]:
                 _load_projection(part, core.w, weights)
