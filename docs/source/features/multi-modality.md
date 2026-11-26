@@ -99,12 +99,16 @@ Supported entries use TensorRT-LLM's `Attention` and apply encoder overrides exp
 
 Please refer to the latest multimodal [support matrix](../models/supported-models.md#multimodal-feature-support-matrix-pytorch-backend).
 
-### Image inputs for Nemotron Shortcut
+### Image and video inputs for Nemotron Shortcut
 
-BF16 and MXFP8 support image chat and raw image captioning. With the validated
-NVFP4 checkpoint, use a raw caption prompt such as `<nemo:img>\nA photo of`,
-with a newline after the image placeholder. Image chat with that checkpoint's
-shipped template can continue generating until the output token limit.
+BF16, MXFP8 and NVFP4 checkpoints with the single-frame video processor
+support image chat with the shipped template and raw image captioning. For a raw caption, place `A photo of` on the line immediately
+after the `<nemo:img>` placeholder.
+
+For video, use the checkpoint's chat template with a video content item.
+The processor samples frames and adds their timestamps to the prompt.
+On GB300, all three weight formats were tested with
+`multimodal_config.video_pruning_rate` set to `0.0` and `0.5`.
 
 ## Adding a Model
 
