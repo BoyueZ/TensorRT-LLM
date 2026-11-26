@@ -7,7 +7,13 @@ import torch
 from tensorrt_llm._torch.configs.nemotron_shortcut import NemotronShortcutTextConfig
 from tensorrt_llm.quantization.mode import QuantAlgo
 
-from ..._router_index import NoTarget, engine_kv_cache_quant_algo, input_processors, routes
+from ..._router_index import (
+    NoTarget,
+    engine_kv_cache_quant_algo,
+    input_processors,
+    recurrent_state_specs,
+    routes,
+)
 
 # (world size, attention DP, MoE TP, MoE EP), all on a single SM103 node.
 _FOUR_RANK_LAYOUTS = {
@@ -180,3 +186,17 @@ def input_processor(config, *, disable_mm_encoder):
     from .multimodal import ShortcutInputProcessor
 
     return media_config, ShortcutInputProcessor
+
+
+@recurrent_state_specs(NemotronShortcutTextConfig.causal_lm_architecture)
+def recurrent_state_spec(config, *, quant_config=None):
+    from tensorrt_llm._torch.modules.nemotron_shortcut.cache_manager import (
+        get_nemotron_shortcut_cache_params,
+    )
+    from tensorrt_llm._torch.recurrent_state_spec import recurrent_state_spec_from_mamba_params
+
+    params = get_nemotron_shortcut_cache_params(config, quant_config=quant_config)
+    # The convolution plane packs more sections than the two shared orders describe.
+    return recurrent_state_spec_from_mamba_params(
+        params, conv_sections=tuple(config.gdp_conv_section_widths)
+    )
